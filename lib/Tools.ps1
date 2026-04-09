@@ -1,5 +1,5 @@
-# lib.ps1 — shared functions for build and provisioning scripts
-# Dot-sourced (not executed). Requires: $scriptDir
+# Tools.ps1 — tool archive build system
+# Dot-sourced (not executed). Requires: $projectRoot
 
 $sha256 = {
   [BitConverter]::ToString(
@@ -63,7 +63,7 @@ $fetchToolVersions = {
 }
 
 $resolveArchive = { param($tier, $prefix)
-  $matches = @(Get-ChildItem "$toolsDir\${tier}-${prefix}*.tar.gz" -ErrorAction SilentlyContinue)
+  $matches = @(Get-ChildItem "$toolsDir\${tier}-${prefix}*.tar.xz" -ErrorAction SilentlyContinue)
   if ($matches.Count -eq 0) { throw "No cached archive found for $tier hash '$prefix'" }
   if ($matches.Count -gt 1) { throw "Ambiguous hash prefix '$prefix' -- matches multiple $tier archives" }
   $matches[0].FullName
@@ -78,15 +78,15 @@ $buildToolArchives = {
   }
   else {
     if (-not $script:nodeVer) { . $fetchToolVersions }
-    $baseHash = & $sha256 "base-node:$nodeVer-rg:$rgVer-micro:$microVer-$([IO.File]::ReadAllText("$scriptDir\claude-wrapper.sh"))"
-    $script:baseArchive = "$toolsDir\base-$baseHash.tar.gz"
+    $baseHash = & $sha256 "base-node:$nodeVer-rg:$rgVer-micro:$microVer-$([IO.File]::ReadAllText("$projectRoot\bin\claude-wrapper.sh"))"
+    $script:baseArchive = "$toolsDir\base-$baseHash.tar.xz"
     if (-not [IO.File]::Exists($baseArchive) -or $forcePull) {
       Write-Host "  Downloading node $nodeVer, ripgrep $rgVer, micro $microVer..." -ForegroundColor DarkGray
       $tmpDir = Join-Path ([IO.Path]::GetTempPath()) "claude-build-$(Get-Random)"
       [IO.Directory]::CreateDirectory($tmpDir) > $null
       try {
         # Download node, rg, micro — start all async, then extract sequentially
-        $nodeUrl = "https://nodejs.org/dist/v${nodeVer}/node-v${nodeVer}-linux-${archNode}.tar.gz"
+        $nodeUrl = "https://nodejs.org/dist/v${nodeVer}/node-v${nodeVer}-linux-${archNode}.tar.xz"
         $rgUrl = "https://github.com/BurntSushi/ripgrep/releases/download/${rgVer}/ripgrep-${rgVer}-${archRg}.tar.gz"
         $microUrl = "https://github.com/zyedidia/micro/releases/download/v${microVer}/micro-${microVer}-${archMicro}.tar.gz"
         $nodeTask = $http.GetByteArrayAsync($nodeUrl)
@@ -95,8 +95,8 @@ $buildToolArchives = {
         [Threading.Tasks.Task]::WaitAll($nodeTask, $rgTask, $microTask)
 
         # Write and extract each
-        $nodeTmp = "$tmpDir\_node.tar.gz"; [IO.File]::WriteAllBytes($nodeTmp, $nodeTask.Result)
-        tar -xzf $nodeTmp -C $tmpDir --strip-components=2 "node-v${nodeVer}-linux-${archNode}/bin/node"
+        $nodeTmp = "$tmpDir\_node.tar.xz"; [IO.File]::WriteAllBytes($nodeTmp, $nodeTask.Result)
+        tar -xJf $nodeTmp -C $tmpDir --strip-components=2 "node-v${nodeVer}-linux-${archNode}/bin/node"
         Remove-Item $nodeTmp
 
         $rgTmp = "$tmpDir\_rg.tar.gz"; [IO.File]::WriteAllBytes($rgTmp, $rgTask.Result)
@@ -107,8 +107,8 @@ $buildToolArchives = {
         tar -xzf $microTmp -C $tmpDir --strip-components=1 "micro-${microVer}/micro"
         Remove-Item $microTmp
 
-        Copy-Item "$scriptDir\claude-wrapper.sh" "$tmpDir\claude-wrapper"
-        tar -czf $baseArchive -C $tmpDir node rg micro claude-wrapper
+        Copy-Item "$projectRoot\bin\claude-wrapper.sh" "$tmpDir\claude-wrapper"
+        tar -cJf $baseArchive -C $tmpDir node rg micro claude-wrapper
       }
       finally { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
     }
@@ -122,7 +122,7 @@ $buildToolArchives = {
   else {
     if (-not $script:pnpmVer) { . $fetchToolVersions }
     $toolHash = & $sha256 "tool-pnpm:$pnpmVer-uv:$uvVer"
-    $script:toolArchive = "$toolsDir\tool-$toolHash.tar.gz"
+    $script:toolArchive = "$toolsDir\tool-$toolHash.tar.xz"
     if (-not [IO.File]::Exists($toolArchive) -or $forcePull) {
       Write-Host "  Downloading pnpm $pnpmVer, uv $uvVer..." -ForegroundColor DarkGray
       $tmpDir = Join-Path ([IO.Path]::GetTempPath()) "claude-build-$(Get-Random)"
@@ -137,7 +137,7 @@ $buildToolArchives = {
         tar -xzf $uvTmp -C $tmpDir --strip-components=1
         Remove-Item $uvTmp
 
-        tar -czf $toolArchive -C $tmpDir pnpm uv uvx
+        tar -cJf $toolArchive -C $tmpDir pnpm uv uvx
       }
       finally { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
     }
@@ -151,7 +151,7 @@ $buildToolArchives = {
   else {
     if (-not $script:claudeVer) { . $fetchToolVersions }
     $claudeHash = & $sha256 "claude-$claudeVer"
-    $script:claudeArchive = "$toolsDir\claude-$claudeHash.tar.gz"
+    $script:claudeArchive = "$toolsDir\claude-$claudeHash.tar.xz"
     if (-not [IO.File]::Exists($claudeArchive) -or $forcePull) {
       Write-Host "  Downloading claude $claudeVer..." -ForegroundColor DarkGray
       $gcsBucket = 'https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases'
@@ -160,7 +160,7 @@ $buildToolArchives = {
       try {
         $claudeBytes = $http.GetByteArrayAsync("$gcsBucket/$claudeVer/$archClaude/claude").Result
         [IO.File]::WriteAllBytes("$tmpDir\claude", $claudeBytes)
-        tar -czf $claudeArchive -C $tmpDir claude
+        tar -cJf $claudeArchive -C $tmpDir claude
       }
       finally { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
     }

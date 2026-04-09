@@ -9,6 +9,7 @@ BASE_IMAGE=""
 MACHINE_CPUS=""
 MACHINE_MEMORY=""
 MACHINE_DISK_SIZE=""
+WITH_DNF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --base-hash)   OPT_BASE_HASH="$2"; shift 2 ;;
@@ -19,6 +20,7 @@ while [ $# -gt 0 ]; do
     --cpus)        MACHINE_CPUS="$2"; shift 2 ;;
     --memory)      MACHINE_MEMORY="$2"; shift 2 ;;
     --disk-size)   MACHINE_DISK_SIZE="$2"; shift 2 ;;
+    --with-dnf)    WITH_DNF=1; shift ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -29,9 +31,12 @@ MACHINE_ARGS=""
 [ -n "$BASE_IMAGE" ]        && MACHINE_ARGS="$MACHINE_ARGS --image $BASE_IMAGE"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-"$SCRIPT_DIR/ensure-credential.sh"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+"$PROJECT_ROOT/lib/ensure-credential.sh"
 
-. "$SCRIPT_DIR/lib.sh"
+. "$PROJECT_ROOT/lib/init-config.sh"
+. "$PROJECT_ROOT/lib/tools.sh"
+init_config_dir
 
 # ── Build tool archives ──
 
@@ -59,38 +64,26 @@ podman machine stop "$MACHINE_NAME" 2>/dev/null || true
 podman machine rm -f "$MACHINE_NAME" 2>/dev/null || true
 stop_all_machines
 
-# Prepare config dir with only the 3 required files
-CONFIG_DIR="$CACHE_DIR/config"
-mkdir -p "$CONFIG_DIR"
-for f in .claude.json settings.json .credentials.json; do
-  [ -f "$SCRIPT_DIR/$f" ] || { echo "Missing config file: $f" >&2; exit 1; }
-  ln -f "$SCRIPT_DIR/$f" "$CONFIG_DIR/$f" 2>/dev/null || cp -f "$SCRIPT_DIR/$f" "$CONFIG_DIR/$f"
-done
-
 # Create runtime VM (fresh init — ignition runs, virtiofs mounts work natively)
 podman machine init "$MACHINE_NAME" $MACHINE_ARGS \
-  --volume "$PWD:/var/workdir" \
-  --volume "$CONFIG_DIR:/var/config"
+  --volume "$PWD:/var/workdir"
 podman machine start "$MACHINE_NAME"
 
 # Inject tool archives via SSH
 for _archive in "$BASE_ARCHIVE" "$TOOL_ARCHIVE" "$CLAUDE_ARCHIVE"; do
   cat "$_archive" | podman machine ssh "$MACHINE_NAME" \
-    'mkdir -p $HOME/.local/bin && tar -xzf - -C $HOME/.local/bin/ && chmod +x $HOME/.local/bin/*'
+    'mkdir -p $HOME/.local/bin && tar -xJf - -C $HOME/.local/bin/ && chmod +x $HOME/.local/bin/*'
 done
 
-# Configure: symlink config files + make claude available system-wide
-podman machine ssh "$MACHINE_NAME" -- "
-  mkdir -p ~/.claude
-  ln -sf /var/config/.claude.json ~/.claude.json
-  ln -sf /var/config/settings.json ~/.claude/settings.json
-  ln -sf /var/config/.credentials.json ~/.claude/.credentials.json
-  sudo ln -sf \$HOME/.local/bin/claude-wrapper /usr/local/bin/claude
-"
+# Rename: claude → claude-bin, claude-wrapper → claude
+podman machine ssh "$MACHINE_NAME" \
+  'mv $HOME/.local/bin/claude $HOME/.local/bin/claude-bin && mv $HOME/.local/bin/claude-wrapper $HOME/.local/bin/claude'
 
 # Launch with TTY via raw ssh
 SSH_PORT=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.Port}}')
 SSH_KEY=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.IdentityPath}}')
+_ENV="CLAUDE_CONFIG_DIR=/var/workdir/.claude"
+[ -n "$WITH_DNF" ] && _ENV="$_ENV CLAUDE_ENABLE_DNF=1"
 ssh -t -p "$SSH_PORT" -i "$SSH_KEY" \
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-  core@localhost 'cd /var/workdir && exec $HOME/.local/bin/claude-wrapper --dangerously-skip-permissions'
+  core@localhost "cd /var/workdir && exec env $_ENV \$HOME/.local/bin/claude --dangerously-skip-permissions"

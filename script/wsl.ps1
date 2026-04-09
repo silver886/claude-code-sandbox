@@ -3,14 +3,18 @@ param(
   [string]$ToolHash = '',
   [string]$ClaudeHash = '',
   [switch]$ForcePull,
-  [string]$Image = ''
+  [string]$Image = 'fedora:latest',
+  [switch]$WithDnf
 )
 $ErrorActionPreference = 'Stop'
 
 $scriptDir = $PSScriptRoot
-& "$scriptDir\Ensure-Credential.ps1"
+$projectRoot = Split-Path $scriptDir
+& "$projectRoot\lib\Ensure-Credential.ps1"
 
-. "$scriptDir\lib.ps1"
+. "$projectRoot\lib\Init-Config.ps1"
+. "$projectRoot\lib\Tools.ps1"
+. $initConfigDir
 
 # ── Build tool archives ──
 
@@ -42,12 +46,12 @@ if ($needsImport) {
   if ($distroExists) { wsl --unregister $distroName 2>$null }
 
   # Build base image and export as tarball for WSL import
-  $imageTag = "claude-base-$(& $sha256 ([IO.File]::ReadAllText("$scriptDir\Containerfile") + "-$Image"))"
+  $imageTag = "claude-base-$(& $sha256 ([IO.File]::ReadAllText("$projectRoot\Containerfile") + "-$Image"))"
   podman image exists $imageTag 2>$null
   if ($LASTEXITCODE -ne 0 -or $ForcePull) {
-    $buildArgs = @('image', 'build', '--build-arg', "BASE_IMAGE=$( if ($Image) { $Image } else { 'fedora:latest' } )", '--tag', $imageTag)
+    $buildArgs = @('image', 'build', '--build-arg', "BASE_IMAGE=$Image", '--tag', $imageTag)
     if ($ForcePull) { $buildArgs += '--no-cache' }
-    $buildArgs += $scriptDir
+    $buildArgs += $projectRoot
     Invoke-Must podman @buildArgs
   }
   $exportCtr = (Invoke-Must podman container create $imageTag true)
@@ -70,14 +74,17 @@ if ($needsImport) {
   foreach ($archive in $baseArchive, $toolArchive, $claudeArchive) {
     $wslArchive = & $wslSrc $archive
     $tmp = [IO.Path]::GetTempFileName()
-    [IO.File]::WriteAllText($tmp, "mkdir -p /home/claude/.local/bin && tar -xzf '$wslArchive' -C /home/claude/.local/bin/ && chmod +x /home/claude/.local/bin/*`n")
+    [IO.File]::WriteAllText($tmp, "mkdir -p /home/claude/.local/bin && tar -xJf '$wslArchive' -C /home/claude/.local/bin/ && chmod +x /home/claude/.local/bin/*`n")
     $wslTmp = & $wslSrc $tmp
     try { Invoke-Must wsl -d $distroName -u root -- sh $wslTmp }
     finally { [IO.File]::Delete($tmp) }
   }
 
-  # Make claude available system-wide
-  Invoke-Must wsl -d $distroName -u root -- sh -c 'ln -sf /home/claude/.local/bin/claude-wrapper /usr/local/bin/claude'
+  # Rename: claude → claude-bin, claude-wrapper → claude
+  Invoke-Must wsl -d $distroName -u root -- sh -c '
+    mv /home/claude/.local/bin/claude /home/claude/.local/bin/claude-bin &&
+    mv /home/claude/.local/bin/claude-wrapper /home/claude/.local/bin/claude
+  '
 
   # Write wsl.conf and terminate so it takes effect
   Invoke-Must wsl -d $distroName -u root -- sh -c '
@@ -97,30 +104,21 @@ EOF'
 # ── Mount and configure ──
 
 $winWorkdir = $PWD.Path
-$winConfig = $scriptDir
 
 Invoke-Must wsl -d $distroName -u root -- sh -c "
-  mkdir -p /var/workdir /home/claude/.claude /mnt/config &&
-  mount -t drvfs '$($winWorkdir.Replace("'", "'\''"))' /var/workdir &&
-  mount -t drvfs '$($winConfig.Replace("'", "'\''"))' /mnt/config
+  mkdir -p /var/workdir &&
+  mount -t drvfs '$($winWorkdir.Replace("'", "'\''"))' /var/workdir
 "
-foreach ($f in '.claude.json', 'settings.json', '.credentials.json') {
-  if (-not [IO.File]::Exists("$scriptDir\$f")) {
-    throw "Missing config file: $f"
-  }
-}
-Invoke-Must wsl -d $distroName -- sh -c '
-  ln -sf /mnt/config/.claude.json ~/.claude.json &&
-  ln -sf /mnt/config/settings.json ~/.claude/settings.json &&
-  ln -sf /mnt/config/.credentials.json ~/.claude/.credentials.json
-'
 
 # ── Launch with cleanup ──
 
+$envArgs = 'CLAUDE_CONFIG_DIR=/var/workdir/.claude'
+if ($WithDnf) { $envArgs += ' CLAUDE_ENABLE_DNF=1' }
+
 try {
-  Invoke-Must wsl -d $distroName --cd /var/workdir -- sh -c '
-    $HOME/.local/bin/claude-wrapper --dangerously-skip-permissions
-  '
+  Invoke-Must wsl -d $distroName --cd /var/workdir -- sh -c "
+    exec env $envArgs `$HOME/.local/bin/claude --dangerously-skip-permissions
+  "
 }
 finally {
   wsl --terminate $distroName 2>$null

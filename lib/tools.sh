@@ -1,6 +1,6 @@
 #!/bin/sh
-# lib.sh — shared functions for build and provisioning scripts
-# Sourced (not executed). Requires: SCRIPT_DIR
+# tools.sh — tool archive build system
+# Sourced (not executed). Requires: PROJECT_ROOT
 
 if command -v sha256sum >/dev/null 2>&1; then
   sha256() { printf '%s' "$1" | sha256sum | cut -d ' ' -f 1; }
@@ -75,7 +75,7 @@ resolve_archive() {
   _prefix="$2"
   _matches=""
   _count=0
-  for _f in "$TOOLS_DIR/${_tier}-${_prefix}"*.tar.gz; do
+  for _f in "$TOOLS_DIR/${_tier}-${_prefix}"*.tar.xz; do
     [ -f "$_f" ] || continue
     _matches="$_f"
     _count=$((_count + 1))
@@ -99,8 +99,8 @@ build_tool_archives() {
     BASE_ARCHIVE=$(resolve_archive "base" "$OPT_BASE_HASH")
   else
     [ -z "${NODE_VER:-}" ] && fetch_tool_versions
-    BASE_HASH=$(sha256 "base-node:$NODE_VER-rg:$RG_VER-micro:$MICRO_VER-$(cat "$SCRIPT_DIR/claude-wrapper.sh")")
-    BASE_ARCHIVE="$TOOLS_DIR/base-$BASE_HASH.tar.gz"
+    BASE_HASH=$(sha256 "base-node:$NODE_VER-rg:$RG_VER-micro:$MICRO_VER-$(cat "$PROJECT_ROOT/bin/claude-wrapper.sh")")
+    BASE_ARCHIVE="$TOOLS_DIR/base-$BASE_HASH.tar.xz"
     if [ ! -f "$BASE_ARCHIVE" ] || [ -n "${FORCE_PULL:-}" ]; then
       echo "  Downloading node $NODE_VER, ripgrep $RG_VER, micro $MICRO_VER..." >&2
       _DIR=$(mktemp -d)
@@ -116,13 +116,13 @@ build_tool_archives() {
       _PID3=$!
       wait "$_PID1" "$_PID2" "$_PID3"
 
-      cp "$SCRIPT_DIR/claude-wrapper.sh" "$_DIR/claude-wrapper"
+      cp "$PROJECT_ROOT/bin/claude-wrapper.sh" "$_DIR/claude-wrapper"
       chmod +x "$_DIR/node" "$_DIR/rg" "$_DIR/micro" "$_DIR/claude-wrapper"
-      tar -C "$_DIR" -czf "$BASE_ARCHIVE" node rg micro claude-wrapper
+      tar -C "$_DIR" -cJf "$BASE_ARCHIVE" node rg micro claude-wrapper
       rm -rf "$_DIR"
     fi
   fi
-  echo "base:   $(basename "$BASE_ARCHIVE" .tar.gz | sed 's/^base-//')" >&2
+  echo "base:   $(basename "$BASE_ARCHIVE" .tar.xz | sed 's/^base-//')" >&2
 
   # ── Tier 2: Tool (pnpm + uv + uvx) ──
   if [ -n "${OPT_TOOL_HASH:-}" ]; then
@@ -130,7 +130,7 @@ build_tool_archives() {
   else
     [ -z "${PNPM_VER:-}" ] && fetch_tool_versions
     TOOL_HASH=$(sha256 "tool-pnpm:$PNPM_VER-uv:$UV_VER")
-    TOOL_ARCHIVE="$TOOLS_DIR/tool-$TOOL_HASH.tar.gz"
+    TOOL_ARCHIVE="$TOOLS_DIR/tool-$TOOL_HASH.tar.xz"
     if [ ! -f "$TOOL_ARCHIVE" ] || [ -n "${FORCE_PULL:-}" ]; then
       echo "  Downloading pnpm $PNPM_VER, uv $UV_VER..." >&2
       _DIR=$(mktemp -d)
@@ -144,11 +144,11 @@ build_tool_archives() {
       wait "$_PID1" "$_PID2"
 
       chmod +x "$_DIR/pnpm" "$_DIR/uv" "$_DIR/uvx"
-      tar -C "$_DIR" -czf "$TOOL_ARCHIVE" pnpm uv uvx
+      tar -C "$_DIR" -cJf "$TOOL_ARCHIVE" pnpm uv uvx
       rm -rf "$_DIR"
     fi
   fi
-  echo "tools:  $(basename "$TOOL_ARCHIVE" .tar.gz | sed 's/^tool-//')" >&2
+  echo "tools:  $(basename "$TOOL_ARCHIVE" .tar.xz | sed 's/^tool-//')" >&2
 
   # ── Tier 3: Claude Code ──
   if [ -n "${OPT_CLAUDE_HASH:-}" ]; then
@@ -156,16 +156,16 @@ build_tool_archives() {
   else
     [ -z "${CLAUDE_VER:-}" ] && fetch_tool_versions
     CLAUDE_HASH=$(sha256 "claude-$CLAUDE_VER")
-    CLAUDE_ARCHIVE="$TOOLS_DIR/claude-$CLAUDE_HASH.tar.gz"
+    CLAUDE_ARCHIVE="$TOOLS_DIR/claude-$CLAUDE_HASH.tar.xz"
     if [ ! -f "$CLAUDE_ARCHIVE" ] || [ -n "${FORCE_PULL:-}" ]; then
       echo "  Downloading claude $CLAUDE_VER..." >&2
       GCS_BUCKET="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
       _DIR=$(mktemp -d)
       curl -fsSL "$GCS_BUCKET/$CLAUDE_VER/$ARCH_CLAUDE/claude" -o "$_DIR/claude"
       chmod +x "$_DIR/claude"
-      tar -C "$_DIR" -czf "$CLAUDE_ARCHIVE" claude
+      tar -C "$_DIR" -cJf "$CLAUDE_ARCHIVE" claude
       rm -rf "$_DIR"
     fi
   fi
-  echo "claude: $(basename "$CLAUDE_ARCHIVE" .tar.gz | sed 's/^claude-//')" >&2
+  echo "claude: $(basename "$CLAUDE_ARCHIVE" .tar.xz | sed 's/^claude-//')" >&2
 }

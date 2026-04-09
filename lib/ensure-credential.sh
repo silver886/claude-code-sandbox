@@ -2,7 +2,7 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CRED_PATH="$SCRIPT_DIR/.credentials.json"
+CRED_PATH="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
 
 if [ ! -f "$CRED_PATH" ]; then
   echo "Credentials file not found. Run 'claude' to authenticate." >&2
@@ -25,7 +25,8 @@ if [ "$TEST_STATUS" = "401" ]; then
     echo "Token expired, no refresh token. Run 'claude' to re-authenticate." >&2
     exit 1
   fi
-  OAUTH=$(jq -r '"\(.client_id)\n\(.scope)"' "$SCRIPT_DIR/oauth.json")
+
+  OAUTH=$(jq -r '"\(.client_id)\n\(.scope)"' "$(dirname "$SCRIPT_DIR")/config/oauth.json")
   OAUTH_CLIENT_ID=$(printf '%s' "$OAUTH" | head -1)
   OAUTH_SCOPE=$(printf '%s' "$OAUTH" | tail -1)
   BODY=$(jq -nc \
@@ -37,16 +38,19 @@ if [ "$TEST_STATUS" = "401" ]; then
     -H 'Content-Type: application/json' \
     -d "$BODY" 2>/dev/null) || RESPONSE=""
   PARSED=$(printf '%s' "$RESPONSE" | jq -r '"\(.access_token // "")\n\(.expires_in // "")\n\(.refresh_token // "")"' 2>/dev/null)
+
   NEW_ACCESS=$(printf '%s' "$PARSED" | sed -n '1p')
   if [ -z "$NEW_ACCESS" ]; then
     echo "OAuth refresh failed. Run 'claude' to re-authenticate." >&2
     exit 1
   fi
+
   EXPIRES_IN=$(printf '%s' "$PARSED" | sed -n '2p')
   if [ -z "$EXPIRES_IN" ]; then
     echo "OAuth refresh response missing expires_in." >&2
     exit 1
   fi
+
   NOW_MS=$(($(date +%s) * 1000))
   EXPIRES_AT=$((NOW_MS + EXPIRES_IN * 1000))
   NEW_REFRESH=$(printf '%s' "$PARSED" | sed -n '3p')
