@@ -32,16 +32,8 @@ MACHINE_ARGS=""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-"$PROJECT_ROOT/lib/ensure-credential.sh"
-
-. "$PROJECT_ROOT/lib/init-config.sh"
-. "$PROJECT_ROOT/lib/tools.sh"
-init_config_dir
-
-# ── Build tool archives ──
-
-detect_arch
-build_tool_archives
+. "$PROJECT_ROOT/lib/init-launcher.sh"
+init_launcher
 
 # ── Runtime VM ──
 
@@ -69,15 +61,22 @@ podman machine init "$MACHINE_NAME" $MACHINE_ARGS \
   --volume "$PWD:/var/workdir"
 podman machine start "$MACHINE_NAME"
 
-# Inject tool archives via SSH
-for _archive in "$BASE_ARCHIVE" "$TOOL_ARCHIVE" "$CLAUDE_ARCHIVE"; do
-  cat "$_archive" | podman machine ssh "$MACHINE_NAME" \
-    'mkdir -p $HOME/.local/bin && tar -xJf - -C $HOME/.local/bin/ && chmod +x $HOME/.local/bin/*'
+# Bind-mount each config file to prevent atomic replace (EBUSY preserves inode)
+for _f in $CONFIG_FILES; do
+  podman machine ssh "$MACHINE_NAME" \
+    "sudo mount --bind /var/workdir/.claude/$_f /var/workdir/.claude/$_f"
 done
 
-# Rename: claude → claude-bin, claude-wrapper → claude
-podman machine ssh "$MACHINE_NAME" \
-  'mv $HOME/.local/bin/claude $HOME/.local/bin/claude-bin && mv $HOME/.local/bin/claude-wrapper $HOME/.local/bin/claude'
+# Inject setup script and tool archives, then run setup
+cat "$PROJECT_ROOT/bin/setup-tools.sh" | podman machine ssh "$MACHINE_NAME" \
+  'cat > /tmp/setup-tools.sh && chmod +x /tmp/setup-tools.sh'
+_ARCHIVE_ARGS=""
+for _archive in "$BASE_ARCHIVE" "$TOOL_ARCHIVE" "$CLAUDE_ARCHIVE"; do
+  _name=$(basename "$_archive")
+  cat "$_archive" | podman machine ssh "$MACHINE_NAME" "cat > /tmp/$_name"
+  _ARCHIVE_ARGS="$_ARCHIVE_ARGS /tmp/$_name"
+done
+podman machine ssh "$MACHINE_NAME" "/tmp/setup-tools.sh$_ARCHIVE_ARGS"
 
 # Launch with TTY via raw ssh
 SSH_PORT=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.Port}}')

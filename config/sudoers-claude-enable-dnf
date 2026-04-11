@@ -1,0 +1,1 @@
+claude ALL=(root) NOPASSWD: /usr/local/lib/claude-code-sandbox/enable-dnf

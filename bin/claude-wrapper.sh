@@ -1,5 +1,7 @@
 #!/bin/sh
-[ -n "${CLAUDE_ENABLE_DNF:-}" ] && sudo /usr/local/lib/claude-code-sandbox/enable-dnf
+if [ -n "${CLAUDE_ENABLE_DNF:-}" ] && [ -x /usr/local/lib/claude-code-sandbox/enable-dnf ]; then
+  sudo /usr/local/lib/claude-code-sandbox/enable-dnf
+fi
 
 export PATH="$HOME/.local/bin:$PATH"
 [ -f "$HOME/.shrc" ] && . "$HOME/.shrc"

@@ -10,29 +10,13 @@ $ErrorActionPreference = 'Stop'
 
 $scriptDir = $PSScriptRoot
 $projectRoot = Split-Path $scriptDir
-& "$projectRoot\lib\Ensure-Credential.ps1"
+. "$projectRoot\lib\Init-Launcher.ps1"
+. "$projectRoot\lib\Build-Image.ps1"
 
-. "$projectRoot\lib\Init-Config.ps1"
-. "$projectRoot\lib\Tools.ps1"
-. $initConfigDir
-
-# ── Build tool archives ──
-
-. $detectArch
 $optBaseHash = $BaseHash; $optToolHash = $ToolHash; $optClaudeHash = $ClaudeHash
 $forcePull = $ForcePull.IsPresent
-. $buildToolArchives
-
-# ── Build base image ──
-
-$imageTag = "claude-base-$(& $sha256 ([IO.File]::ReadAllText("$projectRoot\Containerfile") + "-$Image"))"
-podman image exists $imageTag 2>$null
-if ($LASTEXITCODE -ne 0 -or $ForcePull) {
-  $buildArgs = @('image', 'build', '--build-arg', "BASE_IMAGE=$Image", '--tag', $imageTag)
-  if ($ForcePull) { $buildArgs += '--no-cache' }
-  $buildArgs += $projectRoot
-  Invoke-Must podman @buildArgs
-}
+. $initLauncher
+. $buildBaseImage
 
 # ── Run ──
 
@@ -40,7 +24,7 @@ if ($LASTEXITCODE -ne 0 -or $ForcePull) {
 $extraArgs = @('--env', 'CLAUDE_CONFIG_DIR=/var/workdir/.claude')
 foreach ($f in $configFiles) {
   $extraArgs += '-v'
-  $extraArgs += "$(& $wslSrc ([IO.Path]::Combine($configDir, $f))):/var/workdir/.claude/$f"
+  $extraArgs += "$(& $wslSrc ([IO.Path]::Combine($PWD.Path, '.claude', $f))):/var/workdir/.claude/$f"
 }
 if ($WithDnf) { $extraArgs += '--env', 'CLAUDE_ENABLE_DNF=1' }
 

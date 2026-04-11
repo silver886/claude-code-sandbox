@@ -26,20 +26,12 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-"$PROJECT_ROOT/lib/ensure-credential.sh"
-
-. "$PROJECT_ROOT/lib/init-config.sh"
-. "$PROJECT_ROOT/lib/tools.sh"
-init_config_dir
-
-# ── Build tool archives ──
-
-detect_arch
-build_tool_archives
+. "$PROJECT_ROOT/lib/init-launcher.sh"
+init_launcher
 
 # ── Build base image ──
 
-IMAGE_TAG="claude-base-$(sha256 "$(cat "$PROJECT_ROOT/Containerfile")-$BASE_IMAGE")"
+IMAGE_TAG="claude-base-$(sha256 "$(cat "$PROJECT_ROOT/Containerfile" "$PROJECT_ROOT/bin/enable-dnf.sh" "$PROJECT_ROOT/bin/setup-tools.sh" "$PROJECT_ROOT/config/sudoers-claude-enable-dnf")-$BASE_IMAGE")"
 if ! podman image exists "$IMAGE_TAG" 2>/dev/null || [ -n "${FORCE_PULL:-}" ]; then
   _BUILD_ARGS=""
   [ -n "${FORCE_PULL:-}" ] && _BUILD_ARGS="--no-cache"
@@ -51,7 +43,7 @@ fi
 # Build config file mounts (live sync with host config dir)
 _CFG_MOUNTS=""
 for _f in $CONFIG_FILES; do
-  _CFG_MOUNTS="$_CFG_MOUNTS -v $CONFIG_DIR/$_f:/var/workdir/.claude/$_f"
+  _CFG_MOUNTS="$_CFG_MOUNTS -v $PWD/.claude/$_f:/var/workdir/.claude/$_f"
 done
 
 podman container run --interactive --tty --rm \

@@ -7,8 +7,6 @@ $sha256 = {
   ).Replace('-', '').ToLower()
 }
 
-$wslSrc = { param($p) Invoke-Must wsl wslpath -a ($p.Replace('\', '/')) }
-
 $http = [Net.Http.HttpClient]::new()
 $http.DefaultRequestHeaders.UserAgent.ParseAdd('claude-code-sandbox/1.0')
 

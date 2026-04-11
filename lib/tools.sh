@@ -8,6 +8,18 @@ else
   sha256() { printf '%s' "$1" | shasum -a 256 | cut -d ' ' -f 1; }
 fi
 
+# Wait for all PIDs; if any failed, report and exit.
+# POSIX wait with multiple PIDs only returns the last one's status.
+wait_all() {
+  _wa_fail=0
+  for _wa_pid in "$@"; do
+    wait "$_wa_pid" || _wa_fail=1
+  done
+  if [ "$_wa_fail" -ne 0 ]; then
+    echo "One or more background tasks failed" >&2; exit 1
+  fi
+}
+
 # ── Tool archive system ──
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-code-sandbox"
@@ -58,7 +70,7 @@ fetch_tool_versions() {
   (curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null \
     | jq -r .version > "$_DIR/claude") &
   _PID6=$!
-  wait "$_PID1" "$_PID2" "$_PID3" "$_PID4" "$_PID5" "$_PID6"
+  wait_all "$_PID1" "$_PID2" "$_PID3" "$_PID4" "$_PID5" "$_PID6"
   NODE_VER=$(cat "$_DIR/node")
   RG_VER=$(cat "$_DIR/rg")
   MICRO_VER=$(cat "$_DIR/micro")
@@ -66,6 +78,11 @@ fetch_tool_versions() {
   UV_VER=$(cat "$_DIR/uv")
   CLAUDE_VER=$(cat "$_DIR/claude")
   rm -rf "$_DIR"
+  # Validate — pipelines can exit 0 despite curl/jq failure (no pipefail in POSIX sh)
+  if [ -z "$NODE_VER" ] || [ -z "$RG_VER" ] || [ -z "$MICRO_VER" ] || \
+     [ -z "$PNPM_VER" ] || [ -z "$UV_VER" ] || [ -z "$CLAUDE_VER" ]; then
+    echo "Failed to fetch one or more tool versions" >&2; exit 1
+  fi
 }
 
 # Resolve a hash prefix to a cached archive path
@@ -114,7 +131,7 @@ build_tool_archives() {
       (curl -fsSL "https://github.com/zyedidia/micro/releases/download/v${MICRO_VER}/micro-${MICRO_VER}-${ARCH_MICRO}.tar.gz" \
         | tar -xz --strip-components=1 -C "$_DIR" "micro-${MICRO_VER}/micro") &
       _PID3=$!
-      wait "$_PID1" "$_PID2" "$_PID3"
+      wait_all "$_PID1" "$_PID2" "$_PID3"
 
       cp "$PROJECT_ROOT/bin/claude-wrapper.sh" "$_DIR/claude-wrapper"
       chmod +x "$_DIR/node" "$_DIR/rg" "$_DIR/micro" "$_DIR/claude-wrapper"
@@ -141,7 +158,7 @@ build_tool_archives() {
       (curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VER}/uv-${ARCH_UV}.tar.gz" \
         | tar -xz --strip-components=1 -C "$_DIR") &
       _PID2=$!
-      wait "$_PID1" "$_PID2"
+      wait_all "$_PID1" "$_PID2"
 
       chmod +x "$_DIR/pnpm" "$_DIR/uv" "$_DIR/uvx"
       tar -C "$_DIR" -cJf "$TOOL_ARCHIVE" pnpm uv uvx
