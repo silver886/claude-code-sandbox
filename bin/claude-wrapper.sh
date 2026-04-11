@@ -11,6 +11,7 @@ CLAUDE_BIN="$HOME/.local/bin/claude-bin"
 [ -x "$CLAUDE_BIN" ] || { echo "error: claude binary not found" >&2; exit 1; }
 
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1
 export EDITOR=micro
 
 exec "$CLAUDE_BIN" "$@"
