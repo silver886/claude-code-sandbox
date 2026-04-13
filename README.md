@@ -25,12 +25,14 @@ Optional: pass `--with-dnf` (POSIX) or `-WithDnf` (PowerShell) to enable `sudo d
 
 Four launcher scripts, same flags, same result — pick whichever matches your host:
 
-| Script                        | Host          | Isolation                                                                         |
-| ----------------------------- | ------------- | --------------------------------------------------------------------------------- |
-| `script/podman-container.sh`  | Linux / macOS | Podman container, rootless, `--userns=keep-id`                                    |
-| `script/podman-machine.sh`    | Linux / macOS | Fresh Podman VM per workdir, destroyed on exit                                    |
-| `script/podman-container.ps1` | Windows       | Podman container via Podman Desktop / WSL backend                                 |
-| `script/wsl.ps1`              | Windows       | Fresh WSL distro per workdir imported from the Podman image, unregistered on exit |
+| Script                        | Host    | Isolation                                                                         |
+| ----------------------------- | ------- | --------------------------------------------------------------------------------- |
+| `script/podman-container.sh`  | Linux   | Podman container, rootless, `--userns=keep-id`                                    |
+| `script/podman-machine.sh`    | Linux   | Fresh Podman VM per workdir, destroyed on exit                                    |
+| `script/podman-container.ps1` | Windows | Podman container via Podman Desktop / WSL backend                                 |
+| `script/wsl.ps1`              | Windows | Fresh WSL distro per workdir imported from the Podman image, unregistered on exit |
+
+Supported hosts are Fedora and Windows. macOS is not supported — see the Lifecycle section for the upstream bug.
 
 The Podman container scripts keep the sandbox process-scoped. The `podman-machine` and `wsl` scripts go further and throw away an entire VM/distro at the end of the session — heavier, but the strongest isolation the host can provide short of a separate machine.
 
@@ -39,10 +41,10 @@ The Podman container scripts keep the sandbox process-scoped. The `podman-machin
 From the directory you want to expose to Claude:
 
 ```sh
-# Linux/macOS — container
+# Linux — container
 /path/to/claude-code-sandbox/script/podman-container.sh
 
-# Linux/macOS — fresh VM per session
+# Linux — fresh VM per session
 /path/to/claude-code-sandbox/script/podman-machine.sh
 
 # Windows — container
@@ -85,7 +87,7 @@ Splitting into three tiers means a new Claude Code release only invalidates Tier
 
 This keeps the image itself small and stable — toolchain upgrades happen in the cache, not in the image.
 
-### Credentials
+### Credentials and global config
 
 `lib/ensure-credential.sh` / `lib/Ensure-Credential.ps1` run on the host before launching the sandbox. They:
 
@@ -95,18 +97,41 @@ This keeps the image itself small and stable — toolchain upgrades happen in th
 
 If there is no credential file, you are told to run `claude` on the host once to authenticate.
 
-`lib/init-config.sh` / `lib/Init-Config.ps1` then prepare `$PWD/.claude/` by hardlinking `.credentials.json`, `settings.json`, and `.claude.json` (whichever exist) to the real files after resolving any symlink chains.
+`lib/init-config.sh` / `lib/Init-Config.ps1` then stage a curated subset of `~/.claude/` into the project itself, under `$PWD/.claude/.system/`. The staging dir has four buckets:
 
-Claude Code uses atomic file replacement (write temp + rename) to update config files. This creates a new inode, which would silently break hardlinks. All backends prevent this by making each config file a bind mount point — `rename()` and `unlink()` fail with `EBUSY`, forcing Claude Code's fallback to in-place `writeFileSync()` which preserves the shared inode.
+- `ro/` — **copies** of read-only files: `CLAUDE.md`, `keybindings.json`, `rules/`, `commands/`, `agents/`, `output-styles/`, `skills/*/`. The whole `ro/` dir is wiped + re-copied on every launch, so any in-session tampering is undone and upstream deletions in `~/.claude/` propagate. Even if the read-only mount were bypassed, writes cannot reach the host because the copies are independent inodes.
+- `rw/` — **hardlinks** to writable files: `.credentials.json`, `settings.json`, `.claude.json`. They share an inode with `~/.claude/`, so in-place writes inside the sandbox propagate back immediately. Refreshed with `ln -f` every launch.
+- `cr/` — **created at runtime by Claude**: persists across launches as per-project session history. No speculative subdirs are pre-created — Claude `mkdir`s whatever it needs (`projects/`, `shell-snapshots/`, `tasks/`, `.claude.json.backup`, …) on demand under the cr/-as-base bind mount. The only entries we touch in `cr/` are mount-target placeholders for the per-file/per-subdir overlays.
+- `.mask/` — an empty dir, used purely as the bind source that masks `.system/` from project scope inside the sandbox.
 
-- **Container scripts** achieve this via podman's per-file `-v` mounts.
-- **Machine and WSL scripts** run `mount --bind` on each config file inside the sandbox after the directory mount is active.
+**Inside the sandbox** every launcher sets `CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox` and assembles all four buckets there:
+
+1. `cr/` is bind-mounted as the base of `/etc/claude-code-sandbox` (rw — Claude's runtime writes land back in the project's `cr/`)
+2. each writable file in `rw/` is bind-mounted on top per-file, so the path becomes a mount point — `rename()`/`unlink()` give EBUSY and Claude Code's atomic-replace falls back to in-place `writeFileSync()`, which preserves the host hardlink and syncs changes immediately
+3. each `ro/` file and subdir is bind-mounted on top read-only via `mount --bind` + `mount -o remount,bind,ro`
+4. `.mask/` is bind-mounted (read-only) on top of `/var/workdir/.claude/.system` so the system bucket is **invisible from project scope**: anything reading under `/var/workdir/.claude/` sees an empty `.system/` while `/etc/claude-code-sandbox` continues to serve real content (the bind mounts captured the host inodes before the mask was applied). We use a bind of an empty dir instead of `--tmpfs` because podman `--tmpfs` over a path nested inside another `-v` mount has been observed to silently no-op on some podman/WSL combinations.
+
+The atomic-rename → writeFileSync fallback matters because rename semantics differ across drvfs (WSL), virtiofs (Podman machine), and overlayfs/bind mounts — EBUSY forces a code path that is portable everywhere.
+
+- **Container scripts** assemble everything directly via podman `-v` flag stacking — no in-container privileges required. The 3 writable files are passed as `-v $SYSTEM_DIR/rw/<file>:/etc/claude-code-sandbox/<file>`.
+- **podman-machine.sh** mounts only the workdir into the VM, then runs `bin/setup-system-mounts.sh` as root over SSH to do steps 1–4. Same script, same `rw/` source.
+- **wsl.ps1** mounts only the workdir via `drvfs`, then runs `bin/setup-system-mounts.sh` as root (the script is baked into `/usr/local/libexec/claude-code-sandbox/setup-system-mounts.sh` during the import block — `wsl.conf` disables `/mnt/c` automount once installed, so subsequent launches can't reach the host file). Same script, same overlay logic.
+
+Claude itself is launched as an unprivileged user (`core` on the VM, `claude` in the container/distro) — sudo is used solely for the mount syscalls.
+
+> **Supported hosts:** Fedora (Linux) and Windows (WSL2). macOS is not currently supported — `podman machine` on macOS uses Apple Virtualization.framework virtio-fs whose metadata cache hits EACCES on multi-hardlinked inodes after in-place writes (FB16008360 / [containers/podman#24725](https://github.com/containers/podman/issues/24725)), and there is no podman-side workaround for the per-file bind layout this project uses.
+
+The single `$PWD → /var/workdir` mount on the VM/WSL backends is what avoids the macOS Apple vfkit virtio-fs bug where a `mount --bind` whose target sits under a `mount -o remount,ro,bind` virtio-fs parent makes `open()` return EACCES for non-root processes (containers/podman#24725, FB16008360). All binds in the new layout have source and target on the same device.
+
+> **Tip:** add `.claude/.system/` to your project `.gitignore`. The bucket contains your hardlinked `~/.claude/.credentials.json` (OAuth token) and per-project session history — none of it belongs in commits.
 
 ### Lifecycle
 
-- **Container scripts** — `podman run --rm` with the archives, the workdir, and each config file bind-mounted. Dies with the session.
-- **podman-machine.sh** — hashes `$PWD` to derive a machine name, stops any other running machine (Podman only allows one), inits a fresh VM with `$PWD` virtiofs-mounted at `/var/workdir`, injects the three tool archives via SSH and runs `bin/setup-tools.sh` to extract them into `$HOME/.local/bin`, then opens an interactive SSH session running `claude`. An `EXIT` trap stops and removes the machine no matter how the session ends.
-- **wsl.ps1** — hashes `$PWD` to derive a distro name, imports the Podman base image as a WSL tarball, runs `bin/setup-tools.sh` via `wsl -u root` to extract the archives into `$HOME/.local/bin`, installs `config/wsl.conf` to disable automount, Windows interop, and `PATH` append (cutting off host access), mounts the Windows workdir via `drvfs`, runs Claude, then unregisters the distro on exit. A stamp file (`.archive-hash`) is kept so repeated runs on the same workdir can reuse the distro unless the toolchain changed.
+- **Container scripts** — `podman run --rm` with the archives, the workdir, the per-file/per-subdir `-v` mounts assembling `/etc/claude-code-sandbox`, and a `-v $PWD/.claude/.system/.mask:/var/workdir/.claude/.system:ro` bind masking `.system/` from project scope. Dies with the session; nothing on host to clean up (the project's `.claude/.system/` persists by design).
+- **podman-machine.sh** — hashes `$PWD` to derive a machine name, stops any other running machine (Podman only allows one), inits a fresh VM with a single `$PWD → /var/workdir` virtio-fs volume. After start, pipes `bin/setup-system-mounts.sh` in over SSH and runs it as root to assemble `/etc/claude-code-sandbox` (and bind the `.mask/` over `.system/`). Then injects the three tool archives, runs `bin/setup-tools.sh`, and opens an interactive `ssh -tt` session running `claude` as `core`. An `EXIT` trap stops and removes the machine no matter how the session ends.
+- **wsl.ps1** — hashes `$PWD` to derive a distro name, imports the Podman base image as a WSL tarball, runs `bin/setup-tools.sh` via `wsl -u root` to extract the archives into `$HOME/.local/bin`, **bakes `bin/setup-system-mounts.sh` into the distro at `/usr/local/libexec/claude-code-sandbox/setup-system-mounts.sh`** (must happen here while `/mnt/c` is still automounted), installs `config/wsl.conf` to disable automount and Windows interop, then on every launch mounts the Windows workdir via `drvfs` and runs the in-distro `setup-system-mounts.sh` as root to assemble `/etc/claude-code-sandbox`, then runs Claude and unregisters the distro on exit. A stamp file (`.archive-hash`) — keyed on the tool archives, the base image, `wsl.conf`, **and `setup-system-mounts.sh`** — is kept so repeated runs on the same workdir can reuse the distro unless any of those change.
+
+If you have stale per-session staging dirs from a previous version under `$XDG_CACHE_HOME/claude-code-sandbox/config-*` (or `%LOCALAPPDATA%\.cache\claude-code-sandbox\config-*`), it is safe to `rm -rf` them — they are no longer used.
 
 ## Requirements
 

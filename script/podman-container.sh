@@ -26,6 +26,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
 . "$PROJECT_ROOT/lib/init-launcher.sh"
 init_launcher
 
@@ -39,11 +40,30 @@ if ! podman image exists "$IMAGE_TAG" 2>/dev/null || [ -n "${FORCE_PULL:-}" ]; t
 fi
 
 # ── Run ──
+#
+# System config assembly via podman -v stacking (no in-container privileges):
+#   1. cr/ as the base of /etc/claude-code-sandbox (rw, persists per project)
+#   2. rw/<f> per-file mounts shadow cr at <f> with the host hardlinks
+#      (mount-point gives EBUSY → in-place writeFileSync → host sync)
+#   3. ro/<x>:ro per-file/per-subdir mounts shadow cr at <x>, read-only
+#   4. .mask/ bind-mounted (read-only) over /var/workdir/.claude/.system
+#      to mask system scope from project scope. Bind-of-empty-dir
+#      instead of --tmpfs because podman --tmpfs nested under another
+#      -v has been observed to silently no-op.
 
-# Build config file mounts (live sync with host config dir)
-_CFG_MOUNTS=""
+# Build the cfg-mount args as positional parameters so paths with
+# spaces survive (POSIX sh has no real arrays — `set --` is the
+# closest thing). Each `-v` flag is two positional args; `"$@"`
+# expands them properly quoted into the podman run call.
+set -- -v "$SYSTEM_DIR/cr:/etc/claude-code-sandbox"
 for _f in $CONFIG_FILES; do
-  _CFG_MOUNTS="$_CFG_MOUNTS -v $PWD/.claude/$_f:/var/workdir/.claude/$_f"
+  set -- "$@" -v "$SYSTEM_DIR/rw/$_f:/etc/claude-code-sandbox/$_f"
+done
+for _f in $RO_FILES; do
+  set -- "$@" -v "$SYSTEM_DIR/ro/$_f:/etc/claude-code-sandbox/$_f:ro"
+done
+for _d in $RO_DIRS; do
+  set -- "$@" -v "$SYSTEM_DIR/ro/$_d:/etc/claude-code-sandbox/$_d:ro"
 done
 
 podman container run --interactive --tty --rm \
@@ -53,8 +73,9 @@ podman container run --interactive --tty --rm \
   -v "$TOOL_ARCHIVE:/tmp/tool.tar.xz:ro" \
   -v "$CLAUDE_ARCHIVE:/tmp/claude.tar.xz:ro" \
   -v "$PWD:/var/workdir" \
-  $_CFG_MOUNTS \
+  "$@" \
+  -v "$SYSTEM_DIR/.mask:/var/workdir/.claude/.system:ro" \
   --workdir /var/workdir \
-  --env CLAUDE_CONFIG_DIR=/var/workdir/.claude \
+  --env CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox \
   ${WITH_DNF:+--env CLAUDE_ENABLE_DNF=1} \
   "$IMAGE_TAG"

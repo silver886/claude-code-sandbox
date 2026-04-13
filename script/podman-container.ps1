@@ -15,17 +15,39 @@ $projectRoot = Split-Path $scriptDir
 
 $optBaseHash = $BaseHash; $optToolHash = $ToolHash; $optClaudeHash = $ClaudeHash
 $forcePull = $ForcePull.IsPresent
+
 . $initLauncher
 . $buildBaseImage
 
 # ── Run ──
+#
+# System config assembly via podman -v stacking (no in-container privileges):
+#   1. cr/ as the base of /etc/claude-code-sandbox (rw, persists per project)
+#   2. rw/<f>      per-file mounts shadow cr at <f> with host hardlinks
+#                  (mount-point gives EBUSY → in-place write → host sync)
+#   3. ro/<x>:ro   per-file/per-subdir mounts shadow cr at <x>, read-only
+#   4. .mask/      bind-mounted (read-only) over /var/workdir/.claude/.system
+#                  to mask system scope from project scope.
 
-# Config file mounts (live sync with host config dir)
-$extraArgs = @('--env', 'CLAUDE_CONFIG_DIR=/var/workdir/.claude')
+$systemDirWsl = & $wslSrc $systemDir
+$extraArgs = @(
+  '--env', 'CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox',
+  '-v', "${systemDirWsl}/cr:/etc/claude-code-sandbox"
+)
 foreach ($f in $configFiles) {
   $extraArgs += '-v'
-  $extraArgs += "$(& $wslSrc ([IO.Path]::Combine($PWD.Path, '.claude', $f))):/var/workdir/.claude/$f"
+  $extraArgs += "${systemDirWsl}/rw/${f}:/etc/claude-code-sandbox/${f}"
 }
+foreach ($f in $roFiles) {
+  $extraArgs += '-v'
+  $extraArgs += "${systemDirWsl}/ro/${f}:/etc/claude-code-sandbox/${f}:ro"
+}
+foreach ($d in $roDirs) {
+  $extraArgs += '-v'
+  $extraArgs += "${systemDirWsl}/ro/${d}:/etc/claude-code-sandbox/${d}:ro"
+}
+$extraArgs += '-v'
+$extraArgs += "${systemDirWsl}/.mask:/var/workdir/.claude/.system:ro"
 if ($WithDnf) { $extraArgs += '--env', 'CLAUDE_ENABLE_DNF=1' }
 
 Invoke-Must podman container run --interactive --tty --rm `

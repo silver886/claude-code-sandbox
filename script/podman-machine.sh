@@ -32,6 +32,15 @@ MACHINE_ARGS=""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Tear the VM down on any exit. The project's .claude/.system layout
+# persists on the host — nothing to clean up there.
+MACHINE_NAME=""
+trap '
+  [ -n "$MACHINE_NAME" ] && podman machine stop "$MACHINE_NAME" 2>/dev/null || true
+  [ -n "$MACHINE_NAME" ] && podman machine rm -f "$MACHINE_NAME" 2>/dev/null || true
+' EXIT
+
 . "$PROJECT_ROOT/lib/init-launcher.sh"
 init_launcher
 
@@ -46,26 +55,32 @@ stop_all_machines() {
 
 WORKDIR_HASH=$(sha256 "$PWD" | cut -c1-16)
 MACHINE_NAME="claude-$WORKDIR_HASH"
-trap '
-  podman machine stop "$MACHINE_NAME" 2>/dev/null || true
-  podman machine rm -f "$MACHINE_NAME" 2>/dev/null || true
-' EXIT
 
 # Clean up leftovers from a previous interrupted run
 podman machine stop "$MACHINE_NAME" 2>/dev/null || true
 podman machine rm -f "$MACHINE_NAME" 2>/dev/null || true
 stop_all_machines
 
-# Create runtime VM (fresh init — ignition runs, virtiofs mounts work natively)
+# Single host→guest mount: $PWD → /var/workdir. .claude/.system/rw/
+# (containing hardlinks to the canonical config files) rides along
+# inside the workdir, so the in-VM bind layer in setup-system-mounts.sh
+# can reach them without exposing all of $CONFIG_DIR.
 podman machine init "$MACHINE_NAME" $MACHINE_ARGS \
   --volume "$PWD:/var/workdir"
 podman machine start "$MACHINE_NAME"
 
-# Bind-mount each config file to prevent atomic replace (EBUSY preserves inode)
-for _f in $CONFIG_FILES; do
-  podman machine ssh "$MACHINE_NAME" \
-    "sudo mount --bind /var/workdir/.claude/$_f /var/workdir/.claude/$_f"
-done
+# Push setup-system-mounts.sh into the VM and run it as root. claude
+# itself is launched below as the unprivileged `core` user — sudo is
+# only used here to do the mount syscalls.
+cat "$PROJECT_ROOT/bin/setup-system-mounts.sh" | podman machine ssh "$MACHINE_NAME" \
+  'cat > /tmp/setup-system-mounts.sh && chmod +x /tmp/setup-system-mounts.sh'
+podman machine ssh "$MACHINE_NAME" \
+  "sudo /tmp/setup-system-mounts.sh \
+     --workdir /var/workdir \
+     --target /etc/claude-code-sandbox \
+     --config-files '$CONFIG_FILES' \
+     --ro-files '$RO_FILES' \
+     --ro-dirs '$RO_DIRS'"
 
 # Inject setup script and tool archives, then run setup
 cat "$PROJECT_ROOT/bin/setup-tools.sh" | podman machine ssh "$MACHINE_NAME" \
@@ -78,11 +93,19 @@ for _archive in "$BASE_ARCHIVE" "$TOOL_ARCHIVE" "$CLAUDE_ARCHIVE"; do
 done
 podman machine ssh "$MACHINE_NAME" "/tmp/setup-tools.sh$_ARCHIVE_ARGS"
 
-# Launch with TTY via raw ssh
+# ── Launch ──
+#
+# Raw `ssh -tt` to the VM — `podman machine ssh MACHINE "cmd"`'s pty
+# allocation has been observed to be unreliable, leaving claude with
+# no controlling tty. `-tt` forces pty allocation on the server side.
+#
+# Not `exec`'d — the EXIT trap still needs to fire to tear down the VM
+# after claude exits.
 SSH_PORT=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.Port}}')
 SSH_KEY=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.IdentityPath}}')
-_ENV="CLAUDE_CONFIG_DIR=/var/workdir/.claude"
+_ENV="CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox"
 [ -n "$WITH_DNF" ] && _ENV="$_ENV CLAUDE_ENABLE_DNF=1"
-ssh -t -p "$SSH_PORT" -i "$SSH_KEY" \
+ssh -tt -p "$SSH_PORT" -i "$SSH_KEY" \
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-  core@localhost "cd /var/workdir && exec env $_ENV \$HOME/.local/bin/claude --dangerously-skip-permissions"
+  core@localhost \
+  "cd /var/workdir && exec env $_ENV \$HOME/.local/bin/claude --dangerously-skip-permissions"
