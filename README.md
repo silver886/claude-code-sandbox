@@ -19,20 +19,20 @@ A user `claude` with `$HOME/.local/bin` on `PATH` containing:
 - `uv`, `uvx`
 - `claude` → wrapper that execs the real Claude Code binary (`claude-bin`) with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1`
 
-Optional: pass `--with-dnf` (POSIX) or `-WithDnf` (PowerShell) to enable `sudo dnf` inside the sandbox for installing extra packages during a session. Fedora-based images only.
+Optional: pass `--with-dnf` (POSIX) or `-WithDnf` (PowerShell) to enable `sudo dnf` inside the sandbox for installing extra packages during a session. Requires a Fedora-based image (the default).
 
 ## Sandbox backends
 
 Four launcher scripts, same flags, same result — pick whichever matches your host:
 
-| Script                        | Host    | Isolation                                                                         |
-| ----------------------------- | ------- | --------------------------------------------------------------------------------- |
-| `script/podman-container.sh`  | Linux   | Podman container, rootless, `--userns=keep-id`                                    |
-| `script/podman-machine.sh`    | Linux   | Fresh Podman VM per workdir, destroyed on exit                                    |
-| `script/podman-container.ps1` | Windows | Podman container via Podman Desktop / WSL backend                                 |
-| `script/wsl.ps1`              | Windows | Fresh WSL distro per workdir imported from the Podman image, unregistered on exit |
+| Script                        | Host            | Isolation                                                                         |
+| ----------------------------- | --------------- | --------------------------------------------------------------------------------- |
+| `script/podman-container.sh`  | Linux / macOS   | Podman container, rootless, `--userns=keep-id`                                    |
+| `script/podman-machine.sh`    | Linux / macOS   | Fresh Podman VM per workdir, destroyed on exit                                    |
+| `script/podman-container.ps1` | Windows (WSL 2) | Podman container via Podman Desktop / WSL backend                                 |
+| `script/wsl.ps1`              | Windows (WSL 2) | Fresh WSL distro per workdir imported from the Podman image, unregistered on exit |
 
-Supported hosts are Fedora and Windows. macOS is not supported — see the Lifecycle section for the upstream bug.
+Supported hosts are Linux, macOS, and Windows (WSL 2).
 
 The Podman container scripts keep the sandbox process-scoped. The `podman-machine` and `wsl` scripts go further and throw away an entire VM/distro at the end of the session — heavier, but the strongest isolation the host can provide short of a separate machine.
 
@@ -41,16 +41,16 @@ The Podman container scripts keep the sandbox process-scoped. The `podman-machin
 From the directory you want to expose to Claude:
 
 ```sh
-# Linux — container
+# Linux / macOS — container (requires a running 'podman machine' on macOS)
 /path/to/claude-code-sandbox/script/podman-container.sh
 
-# Linux — fresh VM per session
+# Linux / macOS — fresh VM per session
 /path/to/claude-code-sandbox/script/podman-machine.sh
 
 # Windows — container
 & C:\path\to\claude-code-sandbox\script\podman-container.ps1
 
-# Windows — fresh WSL distro per session
+# Windows — fresh WSL2 distro per session
 & C:\path\to\claude-code-sandbox\script\wsl.ps1
 ```
 
@@ -83,7 +83,7 @@ Splitting into three tiers means a new Claude Code release only invalidates Tier
 
 ### Sandbox bootstrap
 
-`Containerfile` builds a minimal Fedora image with a `claude` user, `sudo`, and a guarded `enable-dnf` helper. It does not bake any tooling in. Instead, its `ENTRYPOINT` invokes `bin/setup-tools.sh`, which extracts the three archives mounted at `/tmp/{base,tool,claude}.tar.xz` into `$HOME/.local/bin`, renames `claude` → `claude-bin` so the shell wrapper (`bin/claude-wrapper.sh`) can take over the `claude` name, and finally execs `claude --dangerously-skip-permissions`. The same script is used by the VM and WSL backends to set up the toolchain after archive injection.
+`Containerfile` builds a minimal Fedora image with a `claude` user, `sudo`, and a guarded `enable-dnf` helper. It does not bake any tooling in. Instead, its `ENTRYPOINT` invokes `bin/setup-tools.sh`, which extracts the three archives mounted at `/tmp/{base,tool,claude}.tar.xz` into `$HOME/.local/bin`, renames `claude` → `claude-bin` so the shell wrapper (`bin/claude-wrapper.sh`) can take over the `claude` name, and finally execs `claude --dangerously-skip-permissions`. The same script is used by the VM and WSL2 backends to set up the toolchain after archive injection.
 
 This keeps the image itself small and stable — toolchain upgrades happen in the cache, not in the image.
 
@@ -109,9 +109,9 @@ If there is no credential file, you are told to run `claude` on the host once to
 1. `cr/` is bind-mounted as the base of `/etc/claude-code-sandbox` (rw — Claude's runtime writes land back in the project's `cr/`)
 2. each writable file in `rw/` is bind-mounted on top per-file, so the path becomes a mount point — `rename()`/`unlink()` give EBUSY and Claude Code's atomic-replace falls back to in-place `writeFileSync()`, which preserves the host hardlink and syncs changes immediately
 3. each `ro/` file and subdir is bind-mounted on top read-only via `mount --bind` + `mount -o remount,bind,ro`
-4. `.mask/` is bind-mounted (read-only) on top of `/var/workdir/.claude/.system` so the system bucket is **invisible from project scope**: anything reading under `/var/workdir/.claude/` sees an empty `.system/` while `/etc/claude-code-sandbox` continues to serve real content (the bind mounts captured the host inodes before the mask was applied). We use a bind of an empty dir instead of `--tmpfs` because podman `--tmpfs` over a path nested inside another `-v` mount has been observed to silently no-op on some podman/WSL combinations.
+4. `.mask/` is bind-mounted (read-only) on top of `/var/workdir/.claude/.system` so the system bucket is **invisible from project scope**: anything reading under `/var/workdir/.claude/` sees an empty `.system/` while `/etc/claude-code-sandbox` continues to serve real content (the bind mounts captured the host inodes before the mask was applied). We use a bind of an empty dir instead of `--tmpfs` because podman `--tmpfs` over a path nested inside another `-v` mount has been observed to silently no-op on some podman/WSL2 combinations.
 
-The atomic-rename → writeFileSync fallback matters because rename semantics differ across drvfs (WSL), virtiofs (Podman machine), and overlayfs/bind mounts — EBUSY forces a code path that is portable everywhere.
+The atomic-rename → writeFileSync fallback matters because rename semantics differ across drvfs (WSL2), virtiofs (Podman machine), and overlayfs/bind mounts — EBUSY forces a code path that is portable everywhere.
 
 - **Container scripts** assemble everything directly via podman `-v` flag stacking — no in-container privileges required. The 3 writable files are passed as `-v $SYSTEM_DIR/rw/<file>:/etc/claude-code-sandbox/<file>`.
 - **podman-machine.sh** mounts only the workdir into the VM, then runs `bin/setup-system-mounts.sh` as root over SSH to do steps 1–4. Same script, same `rw/` source.
@@ -119,9 +119,9 @@ The atomic-rename → writeFileSync fallback matters because rename semantics di
 
 Claude itself is launched as an unprivileged user (`core` on the VM, `claude` in the container/distro) — sudo is used solely for the mount syscalls.
 
-> **Supported hosts:** Fedora (Linux) and Windows (WSL2). macOS is not currently supported — `podman machine` on macOS uses Apple Virtualization.framework virtio-fs whose metadata cache hits EACCES on multi-hardlinked inodes after in-place writes (FB16008360 / [containers/podman#24725](https://github.com/containers/podman/issues/24725)), and there is no podman-side workaround for the per-file bind layout this project uses.
+> **Supported hosts:** Linux, macOS, and Windows.
 
-The single `$PWD → /var/workdir` mount on the VM/WSL backends is what avoids the macOS Apple vfkit virtio-fs bug where a `mount --bind` whose target sits under a `mount -o remount,ro,bind` virtio-fs parent makes `open()` return EACCES for non-root processes (containers/podman#24725, FB16008360). All binds in the new layout have source and target on the same device.
+The single `$PWD → /var/workdir` mount on the VM/WSL2 backends is what avoids the macOS Apple vfkit virtio-fs bug where a `mount --bind` whose target sits under a `mount -o remount,ro,bind` virtio-fs parent makes `open()` return EACCES for non-root processes (containers/podman#24725, FB16008360). All binds in the new layout have source and target on the same device.
 
 > **Tip:** add `.claude/.system/` to your project `.gitignore`. The bucket contains your hardlinked `~/.claude/.credentials.json` (OAuth token) and per-project session history — none of it belongs in commits.
 
@@ -136,7 +136,7 @@ If you have stale per-session staging dirs from a previous version under `$XDG_C
 ## Requirements
 
 - **Linux/macOS:** `podman`, `curl`, `jq`, `tar`, `sha256sum` (or `shasum`). For `podman-machine.sh`, a working `podman machine` provider (qemu/applehv/hyperv).
-- **Windows:** PowerShell 7+, `podman` (Podman Desktop is fine), `tar.exe` (ships with modern Windows), and WSL 2 for `wsl.ps1`.
+- **Windows:** PowerShell 7+, `podman` (Podman Desktop is fine), `tar.exe` (ships with modern Windows), and WSL2 for `wsl.ps1`.
 - A prior `claude` login on the host so `~/.claude/.credentials.json` exists.
 
 ## Caveats
