@@ -9,7 +9,7 @@ BASE_IMAGE=""
 MACHINE_CPUS=""
 MACHINE_MEMORY=""
 MACHINE_DISK_SIZE=""
-WITH_DNF=""
+ALLOW_DNF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --base-hash)   OPT_BASE_HASH="$2"; shift 2 ;;
@@ -20,7 +20,7 @@ while [ $# -gt 0 ]; do
     --cpus)        MACHINE_CPUS="$2"; shift 2 ;;
     --memory)      MACHINE_MEMORY="$2"; shift 2 ;;
     --disk-size)   MACHINE_DISK_SIZE="$2"; shift 2 ;;
-    --with-dnf)    WITH_DNF=1; shift ;;
+    --allow-dnf)    ALLOW_DNF=1; shift ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -104,7 +104,7 @@ podman machine ssh "$MACHINE_NAME" "/tmp/setup-tools.sh$_ARCHIVE_ARGS"
 SSH_PORT=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.Port}}')
 SSH_KEY=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.IdentityPath}}')
 _ENV="CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox"
-[ -n "$WITH_DNF" ] && _ENV="$_ENV CLAUDE_ENABLE_DNF=1"
+[ -n "$ALLOW_DNF" ] && _ENV="$_ENV CLAUDE_ENABLE_DNF=1"
 ssh -tt -p "$SSH_PORT" -i "$SSH_KEY" \
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
   core@localhost \

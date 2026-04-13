@@ -19,7 +19,7 @@ A user `claude` with `$HOME/.local/bin` on `PATH` containing:
 - `uv`, `uvx`
 - `claude` → wrapper that execs the real Claude Code binary (`claude-bin`) with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1`
 
-Optional: pass `--with-dnf` (POSIX) or `-WithDnf` (PowerShell) to enable `sudo dnf` inside the sandbox for installing extra packages during a session. Requires a Fedora-based image (the default).
+Optional: pass `--allow-dnf` (POSIX) or `-AllowDnf` (PowerShell) to enable `sudo dnf` inside the sandbox for installing extra packages during a session. This flag must be provided at sandbox startup; if omitted, the bootstrap permission is revoked before the agent starts to prevent autonomous privilege escalation. Requires a Fedora-based image (the default).
 
 ## Sandbox backends
 
@@ -63,7 +63,7 @@ All scripts accept:
 | `--claude-hash H` | `-ClaudeHash H` | Pin Tier-3 archive                                              |
 | `--force-pull`    | `-ForcePull`    | Ignore caches, re-download and rebuild                          |
 | `--image IMG`     | `-Image IMG`    | Override base OS image (default `fedora:latest`)                |
-| `--with-dnf`      | `-WithDnf`      | Grant `claude` passwordless `sudo dnf` inside the sandbox       |
+| `--allow-dnf`    | `-AllowDnf`     | Grant `claude` passwordless `sudo dnf` inside the sandbox       |
 
 `podman-machine.sh` additionally takes `--cpus`, `--memory`, `--disk-size` and forwards them to `podman machine init`.
 

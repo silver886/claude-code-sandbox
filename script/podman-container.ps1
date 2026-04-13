@@ -4,7 +4,7 @@ param(
   [string]$ClaudeHash = '',
   [switch]$ForcePull,
   [string]$Image = 'fedora:latest',
-  [switch]$WithDnf
+  [switch]$AllowDnf
 )
 $ErrorActionPreference = 'Stop'
 
@@ -48,7 +48,7 @@ foreach ($d in $roDirs) {
 }
 $extraArgs += '-v'
 $extraArgs += "${systemDirWsl}/.mask:/var/workdir/.claude/.system:ro"
-if ($WithDnf) { $extraArgs += '--env', 'CLAUDE_ENABLE_DNF=1' }
+if ($AllowDnf) { $extraArgs += '--env', 'CLAUDE_ENABLE_DNF=1' }
 
 Invoke-Must podman container run --interactive --tty --rm `
   '--userns=keep-id:uid=1000,gid=1000' `

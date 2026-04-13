@@ -4,7 +4,7 @@ param(
   [string]$ClaudeHash = '',
   [switch]$ForcePull,
   [string]$Image = 'fedora:latest',
-  [switch]$WithDnf
+  [switch]$AllowDnf
 )
 $ErrorActionPreference = 'Stop'
 
@@ -115,7 +115,7 @@ try {
   # ── Launch ──
 
   $envArgs = 'CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox'
-  if ($WithDnf) { $envArgs += ' CLAUDE_ENABLE_DNF=1' }
+  if ($AllowDnf) { $envArgs += ' CLAUDE_ENABLE_DNF=1' }
 
   Invoke-Must wsl -d $distroName --cd /var/workdir -- sh -c "
     exec env $envArgs `$HOME/.local/bin/claude --dangerously-skip-permissions

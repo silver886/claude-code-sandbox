@@ -1,6 +1,10 @@
 #!/bin/sh
-if [ -n "${CLAUDE_ENABLE_DNF:-}" ] && [ -x /usr/local/lib/claude-code-sandbox/enable-dnf ]; then
-  sudo /usr/local/lib/claude-code-sandbox/enable-dnf
+if [ -x /usr/local/lib/claude-code-sandbox/enable-dnf ]; then
+  if [ -n "${CLAUDE_ENABLE_DNF:-}" ]; then
+    sudo /usr/local/lib/claude-code-sandbox/enable-dnf --yes --purge
+  else
+    sudo /usr/local/lib/claude-code-sandbox/enable-dnf --purge
+  fi
 fi
 
 export PATH="$HOME/.local/bin:$PATH"

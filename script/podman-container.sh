@@ -6,7 +6,7 @@ OPT_TOOL_HASH=""
 OPT_CLAUDE_HASH=""
 FORCE_PULL=""
 BASE_IMAGE="fedora:latest"
-WITH_DNF=""
+ALLOW_DNF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --base-hash)   OPT_BASE_HASH="$2"; shift 2 ;;
@@ -14,7 +14,7 @@ while [ $# -gt 0 ]; do
     --claude-hash) OPT_CLAUDE_HASH="$2"; shift 2 ;;
     --force-pull)  FORCE_PULL=1; shift ;;
     --image)       BASE_IMAGE="$2"; shift 2 ;;
-    --with-dnf)    WITH_DNF=1; shift ;;
+    --allow-dnf)    ALLOW_DNF=1; shift ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -77,5 +77,5 @@ podman container run --interactive --tty --rm \
   -v "$SYSTEM_DIR/.mask:/var/workdir/.claude/.system:ro" \
   --workdir /var/workdir \
   --env CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox \
-  ${WITH_DNF:+--env CLAUDE_ENABLE_DNF=1} \
+  ${ALLOW_DNF:+--env CLAUDE_ENABLE_DNF=1} \
   "$IMAGE_TAG"
