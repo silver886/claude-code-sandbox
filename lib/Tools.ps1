@@ -79,6 +79,17 @@ $fetchToolVersions = {
   $pnpmJson.Dispose(); $uvJson.Dispose(); $claudeJson.Dispose()
 }
 
+# Verify a cached tar.xz: present, non-empty, and decodable.
+# `tar -tJf` walks both the xz stream and the tar structure, so it
+# catches truncation from interrupted previous runs / partial
+# downloads / disk corruption.
+$archiveOk = { param($path)
+  if (-not [IO.File]::Exists($path)) { return $false }
+  if ((Get-Item $path).Length -eq 0) { return $false }
+  & tar -tJf $path *> $null
+  return ($LASTEXITCODE -eq 0)
+}
+
 $resolveArchive = { param($tier, $prefix)
   # Note: don't name this $matches — that's a PowerShell automatic
   # variable populated by -match / -replace.
@@ -96,10 +107,19 @@ $resolveArchive = { param($tier, $prefix)
 
 $buildToolArchives = {
   [IO.Directory]::CreateDirectory($toolsDir) > $null
+  # Sweep stale .partial.* archives left by interrupted previous runs
+  # (we build to a temp name and atomic-rename on success, so a
+  # partial archive at the final path should never exist — but the
+  # temp file leaks on Ctrl-C and needs collecting).
+  Get-ChildItem "$toolsDir\*.partial.*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
   # ── Tier 1: Base ──
   if ($optBaseHash) {
     $script:baseArchive = & $resolveArchive 'base' $optBaseHash
+    if (-not (& $archiveOk $baseArchive)) {
+      Write-Log E tools.base fail "pinned archive is corrupt: $(Split-Path -Leaf $baseArchive)"
+      throw "pinned base archive is corrupt"
+    }
     Write-Log I tools.base cache-pin (Split-Path -Leaf $baseArchive)
   }
   else {
@@ -110,10 +130,14 @@ $buildToolArchives = {
     $wrapperSrc = ([IO.File]::ReadAllText("$projectRoot\bin\claude-wrapper.sh")).Replace("`r`n", "`n")
     $baseHash = & $sha256 "base-node:$nodeVer-rg:$rgVer-micro:$microVer-$wrapperSrc"
     $script:baseArchive = "$toolsDir\base-$baseHash.tar.xz"
-    if ([IO.File]::Exists($baseArchive) -and -not $forcePull) {
+    if ((-not $forcePull) -and (& $archiveOk $baseArchive)) {
       Write-Log I tools.base cache-hit (Split-Path -Leaf $baseArchive)
     }
     else {
+      if ([IO.File]::Exists($baseArchive) -and -not $forcePull) {
+        Write-Log W tools.base rebuild "cached archive corrupt; rebuilding"
+        Remove-Item $baseArchive -Force
+      }
       Write-Log I tools.base downloading "node $nodeVer, ripgrep $rgVer, micro $microVer"
       $tmpDir = Join-Path ([IO.Path]::GetTempPath()) "claude-build-$(Get-Random)"
       [IO.Directory]::CreateDirectory($tmpDir) > $null
@@ -142,7 +166,13 @@ $buildToolArchives = {
 
         Copy-Item "$projectRoot\bin\claude-wrapper.sh" "$tmpDir\claude-wrapper"
         Write-Log I tools.base packing (Split-Path -Leaf $baseArchive)
-        tar -cJf $baseArchive -C $tmpDir node rg micro claude-wrapper
+        # Build to a temp path and atomic-rename on success. If the
+        # process is killed mid-tar, the partial file sits at the
+        # .partial path and gets swept on the next run; the final
+        # archive path is never partially written.
+        $baseTmp = "$baseArchive.partial.$PID"
+        tar -cJf $baseTmp -C $tmpDir node rg micro claude-wrapper
+        Move-Item -Force $baseTmp $baseArchive
         Write-Log I tools.base cached (Split-Path -Leaf $baseArchive)
       }
       finally { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
@@ -152,16 +182,24 @@ $buildToolArchives = {
   # ── Tier 2: Tool ──
   if ($optToolHash) {
     $script:toolArchive = & $resolveArchive 'tool' $optToolHash
+    if (-not (& $archiveOk $toolArchive)) {
+      Write-Log E tools.tool fail "pinned archive is corrupt: $(Split-Path -Leaf $toolArchive)"
+      throw "pinned tool archive is corrupt"
+    }
     Write-Log I tools.tool cache-pin (Split-Path -Leaf $toolArchive)
   }
   else {
     if (-not $script:pnpmVer) { . $fetchToolVersions }
     $toolHash = & $sha256 "tool-pnpm:$pnpmVer-uv:$uvVer"
     $script:toolArchive = "$toolsDir\tool-$toolHash.tar.xz"
-    if ([IO.File]::Exists($toolArchive) -and -not $forcePull) {
+    if ((-not $forcePull) -and (& $archiveOk $toolArchive)) {
       Write-Log I tools.tool cache-hit (Split-Path -Leaf $toolArchive)
     }
     else {
+      if ([IO.File]::Exists($toolArchive) -and -not $forcePull) {
+        Write-Log W tools.tool rebuild "cached archive corrupt; rebuilding"
+        Remove-Item $toolArchive -Force
+      }
       Write-Log I tools.tool downloading "pnpm $pnpmVer, uv $uvVer"
       $tmpDir = Join-Path ([IO.Path]::GetTempPath()) "claude-build-$(Get-Random)"
       [IO.Directory]::CreateDirectory($tmpDir) > $null
@@ -176,7 +214,9 @@ $buildToolArchives = {
         Remove-Item $uvTmp
 
         Write-Log I tools.tool packing (Split-Path -Leaf $toolArchive)
-        tar -cJf $toolArchive -C $tmpDir pnpm uv uvx
+        $toolTmp = "$toolArchive.partial.$PID"
+        tar -cJf $toolTmp -C $tmpDir pnpm uv uvx
+        Move-Item -Force $toolTmp $toolArchive
         Write-Log I tools.tool cached (Split-Path -Leaf $toolArchive)
       }
       finally { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
@@ -186,16 +226,24 @@ $buildToolArchives = {
   # ── Tier 3: Claude ──
   if ($optClaudeHash) {
     $script:claudeArchive = & $resolveArchive 'claude' $optClaudeHash
+    if (-not (& $archiveOk $claudeArchive)) {
+      Write-Log E tools.claude fail "pinned archive is corrupt: $(Split-Path -Leaf $claudeArchive)"
+      throw "pinned claude archive is corrupt"
+    }
     Write-Log I tools.claude cache-pin (Split-Path -Leaf $claudeArchive)
   }
   else {
     if (-not $script:claudeVer) { . $fetchToolVersions }
     $claudeHash = & $sha256 "claude-$claudeVer"
     $script:claudeArchive = "$toolsDir\claude-$claudeHash.tar.xz"
-    if ([IO.File]::Exists($claudeArchive) -and -not $forcePull) {
+    if ((-not $forcePull) -and (& $archiveOk $claudeArchive)) {
       Write-Log I tools.claude cache-hit (Split-Path -Leaf $claudeArchive)
     }
     else {
+      if ([IO.File]::Exists($claudeArchive) -and -not $forcePull) {
+        Write-Log W tools.claude rebuild "cached archive corrupt; rebuilding"
+        Remove-Item $claudeArchive -Force
+      }
       Write-Log I tools.claude downloading "claude $claudeVer"
       $gcsBucket = 'https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases'
       $tmpDir = Join-Path ([IO.Path]::GetTempPath()) "claude-build-$(Get-Random)"
@@ -204,7 +252,9 @@ $buildToolArchives = {
         $claudeBytes = $http.GetByteArrayAsync("$gcsBucket/$claudeVer/$archClaude/claude").Result
         [IO.File]::WriteAllBytes("$tmpDir\claude", $claudeBytes)
         Write-Log I tools.claude packing (Split-Path -Leaf $claudeArchive)
-        tar -cJf $claudeArchive -C $tmpDir claude
+        $claudeTmp = "$claudeArchive.partial.$PID"
+        tar -cJf $claudeTmp -C $tmpDir claude
+        Move-Item -Force $claudeTmp $claudeArchive
         Write-Log I tools.claude cached (Split-Path -Leaf $claudeArchive)
       }
       finally { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }

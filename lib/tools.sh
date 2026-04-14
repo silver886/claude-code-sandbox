@@ -110,23 +110,44 @@ resolve_archive() {
   printf '%s' "$_matches"
 }
 
+# Verify a cached tar.xz: not present, zero-length, or corrupt
+# (truncated by an interrupted previous run, partial download, etc).
+# `tar -tJf` fully decodes the xz stream and walks the tar structure,
+# catching both layers of damage.
+_archive_ok() {
+  [ -f "$1" ] && [ -s "$1" ] && tar -tJf "$1" >/dev/null 2>&1
+}
+
 # Build 3-tier tool archives. Respects OPT_BASE_HASH, OPT_TOOL_HASH,
 # OPT_CLAUDE_HASH (pin to cached) and FORCE_PULL (skip cache).
 # Sets: BASE_ARCHIVE, TOOL_ARCHIVE, CLAUDE_ARCHIVE
 build_tool_archives() {
   mkdir -p "$TOOLS_DIR"
+  # Sweep stale .partial.* archives left by interrupted previous runs
+  # (we build to a temp name and atomic-rename on success, so a
+  # partial archive at the final path should never exist — but the
+  # temp file leaks on Ctrl-C and needs collecting).
+  rm -f "$TOOLS_DIR"/*.partial.* 2>/dev/null || true
 
   # ── Tier 1: Base (node + rg + micro + claude-wrapper) ──
   if [ -n "${OPT_BASE_HASH:-}" ]; then
     BASE_ARCHIVE=$(resolve_archive "base" "$OPT_BASE_HASH")
+    if ! _archive_ok "$BASE_ARCHIVE"; then
+      log E tools.base fail "pinned archive is corrupt: $(basename "$BASE_ARCHIVE")"
+      exit 1
+    fi
     log I tools.base cache-pin "$(basename "$BASE_ARCHIVE")"
   else
     [ -z "${NODE_VER:-}" ] && fetch_tool_versions
     BASE_HASH=$(sha256 "base-node:$NODE_VER-rg:$RG_VER-micro:$MICRO_VER-$(cat "$PROJECT_ROOT/bin/claude-wrapper.sh")")
     BASE_ARCHIVE="$TOOLS_DIR/base-$BASE_HASH.tar.xz"
-    if [ -f "$BASE_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+    if [ -z "${FORCE_PULL:-}" ] && _archive_ok "$BASE_ARCHIVE"; then
       log I tools.base cache-hit "$(basename "$BASE_ARCHIVE")"
     else
+      if [ -f "$BASE_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+        log W tools.base rebuild "cached archive corrupt; rebuilding"
+        rm -f "$BASE_ARCHIVE"
+      fi
       log I tools.base downloading "node $NODE_VER, ripgrep $RG_VER, micro $MICRO_VER"
       _DIR=$(mktemp -d)
 
@@ -144,7 +165,13 @@ build_tool_archives() {
       cp "$PROJECT_ROOT/bin/claude-wrapper.sh" "$_DIR/claude-wrapper"
       chmod +x "$_DIR/node" "$_DIR/rg" "$_DIR/micro" "$_DIR/claude-wrapper"
       log I tools.base packing "$(basename "$BASE_ARCHIVE")"
-      tar -C "$_DIR" -cJf "$BASE_ARCHIVE" node rg micro claude-wrapper
+      # Build to a temp path and atomic-rename on success. If the
+      # process is killed mid-tar, the partial file sits at the .partial
+      # path and gets swept on the next run; the final BASE_ARCHIVE
+      # path is never partially written.
+      _BASE_TMP="$BASE_ARCHIVE.partial.$$"
+      tar -C "$_DIR" -cJf "$_BASE_TMP" node rg micro claude-wrapper
+      mv -f "$_BASE_TMP" "$BASE_ARCHIVE"
       rm -rf "$_DIR"
       log I tools.base cached "$(basename "$BASE_ARCHIVE")"
     fi
@@ -153,14 +180,22 @@ build_tool_archives() {
   # ── Tier 2: Tool (pnpm + uv + uvx) ──
   if [ -n "${OPT_TOOL_HASH:-}" ]; then
     TOOL_ARCHIVE=$(resolve_archive "tool" "$OPT_TOOL_HASH")
+    if ! _archive_ok "$TOOL_ARCHIVE"; then
+      log E tools.tool fail "pinned archive is corrupt: $(basename "$TOOL_ARCHIVE")"
+      exit 1
+    fi
     log I tools.tool cache-pin "$(basename "$TOOL_ARCHIVE")"
   else
     [ -z "${PNPM_VER:-}" ] && fetch_tool_versions
     TOOL_HASH=$(sha256 "tool-pnpm:$PNPM_VER-uv:$UV_VER")
     TOOL_ARCHIVE="$TOOLS_DIR/tool-$TOOL_HASH.tar.xz"
-    if [ -f "$TOOL_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+    if [ -z "${FORCE_PULL:-}" ] && _archive_ok "$TOOL_ARCHIVE"; then
       log I tools.tool cache-hit "$(basename "$TOOL_ARCHIVE")"
     else
+      if [ -f "$TOOL_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+        log W tools.tool rebuild "cached archive corrupt; rebuilding"
+        rm -f "$TOOL_ARCHIVE"
+      fi
       log I tools.tool downloading "pnpm $PNPM_VER, uv $UV_VER"
       _DIR=$(mktemp -d)
 
@@ -174,7 +209,9 @@ build_tool_archives() {
 
       chmod +x "$_DIR/pnpm" "$_DIR/uv" "$_DIR/uvx"
       log I tools.tool packing "$(basename "$TOOL_ARCHIVE")"
-      tar -C "$_DIR" -cJf "$TOOL_ARCHIVE" pnpm uv uvx
+      _TOOL_TMP="$TOOL_ARCHIVE.partial.$$"
+      tar -C "$_DIR" -cJf "$_TOOL_TMP" pnpm uv uvx
+      mv -f "$_TOOL_TMP" "$TOOL_ARCHIVE"
       rm -rf "$_DIR"
       log I tools.tool cached "$(basename "$TOOL_ARCHIVE")"
     fi
@@ -183,21 +220,31 @@ build_tool_archives() {
   # ── Tier 3: Claude Code ──
   if [ -n "${OPT_CLAUDE_HASH:-}" ]; then
     CLAUDE_ARCHIVE=$(resolve_archive "claude" "$OPT_CLAUDE_HASH")
+    if ! _archive_ok "$CLAUDE_ARCHIVE"; then
+      log E tools.claude fail "pinned archive is corrupt: $(basename "$CLAUDE_ARCHIVE")"
+      exit 1
+    fi
     log I tools.claude cache-pin "$(basename "$CLAUDE_ARCHIVE")"
   else
     [ -z "${CLAUDE_VER:-}" ] && fetch_tool_versions
     CLAUDE_HASH=$(sha256 "claude-$CLAUDE_VER")
     CLAUDE_ARCHIVE="$TOOLS_DIR/claude-$CLAUDE_HASH.tar.xz"
-    if [ -f "$CLAUDE_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+    if [ -z "${FORCE_PULL:-}" ] && _archive_ok "$CLAUDE_ARCHIVE"; then
       log I tools.claude cache-hit "$(basename "$CLAUDE_ARCHIVE")"
     else
+      if [ -f "$CLAUDE_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+        log W tools.claude rebuild "cached archive corrupt; rebuilding"
+        rm -f "$CLAUDE_ARCHIVE"
+      fi
       log I tools.claude downloading "claude $CLAUDE_VER"
       GCS_BUCKET="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
       _DIR=$(mktemp -d)
       curl -fsSL "$GCS_BUCKET/$CLAUDE_VER/$ARCH_CLAUDE/claude" -o "$_DIR/claude"
       chmod +x "$_DIR/claude"
       log I tools.claude packing "$(basename "$CLAUDE_ARCHIVE")"
-      tar -C "$_DIR" -cJf "$CLAUDE_ARCHIVE" claude
+      _CLAUDE_TMP="$CLAUDE_ARCHIVE.partial.$$"
+      tar -C "$_DIR" -cJf "$_CLAUDE_TMP" claude
+      mv -f "$_CLAUDE_TMP" "$CLAUDE_ARCHIVE"
       rm -rf "$_DIR"
       log I tools.claude cached "$(basename "$CLAUDE_ARCHIVE")"
     fi
