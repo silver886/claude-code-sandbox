@@ -2,16 +2,20 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$(dirname "$SCRIPT_DIR")/lib/log.sh"
+
 CRED_PATH="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
 
+log I cred check "$CRED_PATH"
+
 if [ ! -f "$CRED_PATH" ]; then
-  echo "Credentials file not found. Run 'claude' to authenticate." >&2
+  log E cred fail "credentials file not found; run 'claude' to authenticate"
   exit 1
 fi
 
 ACCESS_TOKEN=$(jq -r '.claudeAiOauth.accessToken // empty' "$CRED_PATH")
 if [ -z "$ACCESS_TOKEN" ]; then
-  echo "No OAuth credentials. Run 'claude' to authenticate." >&2
+  log E cred fail "no OAuth credentials; run 'claude' to authenticate"
   exit 1
 fi
 
@@ -20,9 +24,10 @@ TEST_STATUS=$(curl -sSL -o /dev/null -w "%{http_code}" \
   'https://api.anthropic.com/api/oauth/claude_cli/roles') || TEST_STATUS="000"
 
 if [ "$TEST_STATUS" = "401" ]; then
+  log I cred refresh "access token expired (HTTP 401)"
   REFRESH_TOKEN=$(jq -r '.claudeAiOauth.refreshToken // empty' "$CRED_PATH")
   if [ -z "$REFRESH_TOKEN" ]; then
-    echo "Token expired, no refresh token. Run 'claude' to re-authenticate." >&2
+    log E cred fail "token expired and no refresh token; run 'claude' to re-authenticate"
     exit 1
   fi
 
@@ -41,13 +46,13 @@ if [ "$TEST_STATUS" = "401" ]; then
 
   NEW_ACCESS=$(printf '%s' "$PARSED" | sed -n '1p')
   if [ -z "$NEW_ACCESS" ]; then
-    echo "OAuth refresh failed. Run 'claude' to re-authenticate." >&2
+    log E cred fail "OAuth refresh failed; run 'claude' to re-authenticate"
     exit 1
   fi
 
   EXPIRES_IN=$(printf '%s' "$PARSED" | sed -n '2p')
   if [ -z "$EXPIRES_IN" ]; then
-    echo "OAuth refresh response missing expires_in." >&2
+    log E cred fail "OAuth refresh response missing expires_in"
     exit 1
   fi
 
@@ -63,7 +68,10 @@ if [ "$TEST_STATUS" = "401" ]; then
     CRED_NEW=$(printf '%s' "$CRED_NEW" | jq -c --arg rt "$NEW_REFRESH" '.claudeAiOauth.refreshToken = $rt')
   fi
   printf '%s\n' "$CRED_NEW" > "$CRED_PATH"
-elif [ "$TEST_STATUS" != "200" ]; then
-  echo "Credential check failed (HTTP $TEST_STATUS)." >&2
+  log I cred ok "refreshed (expires in ${EXPIRES_IN}s)"
+elif [ "$TEST_STATUS" = "200" ]; then
+  log I cred ok "access token valid"
+else
+  log E cred fail "credential check failed (HTTP $TEST_STATUS)"
   exit 1
 fi

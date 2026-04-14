@@ -8,6 +8,8 @@ else
   sha256() { printf '%s' "$1" | shasum -a 256 | cut -d ' ' -f 1; }
 fi
 
+# `log` is provided by lib/log.sh, sourced from init-launcher.sh.
+
 # Wait for all PIDs; if any failed, report and exit.
 # POSIX wait with multiple PIDs only returns the last one's status.
 wait_all() {
@@ -44,7 +46,7 @@ detect_arch() {
       ARCH_PNPM="linux-arm64"
       ARCH_CLAUDE="linux-arm64"
       ;;
-    *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
+    *) log E tools fail "unsupported architecture: $ARCH"; exit 1 ;;
   esac
 }
 
@@ -81,7 +83,8 @@ fetch_tool_versions() {
   # Validate — pipelines can exit 0 despite curl/jq failure (no pipefail in POSIX sh)
   if [ -z "$NODE_VER" ] || [ -z "$RG_VER" ] || [ -z "$MICRO_VER" ] || \
      [ -z "$PNPM_VER" ] || [ -z "$UV_VER" ] || [ -z "$CLAUDE_VER" ]; then
-    echo "Failed to fetch one or more tool versions" >&2; exit 1
+    log E tools fail "failed to fetch one or more tool versions"
+    exit 1
   fi
 }
 
@@ -98,9 +101,11 @@ resolve_archive() {
     _count=$((_count + 1))
   done
   if [ "$_count" -eq 0 ]; then
-    echo "No cached archive found for $_tier hash '$_prefix'" >&2; exit 1
+    log E "tools.$_tier" fail "no cached archive matching hash '$_prefix'"
+    exit 1
   elif [ "$_count" -gt 1 ]; then
-    echo "Ambiguous hash prefix '$_prefix' — matches multiple $_tier archives" >&2; exit 1
+    log E "tools.$_tier" fail "ambiguous hash prefix '$_prefix' matches multiple archives"
+    exit 1
   fi
   printf '%s' "$_matches"
 }
@@ -114,12 +119,15 @@ build_tool_archives() {
   # ── Tier 1: Base (node + rg + micro + claude-wrapper) ──
   if [ -n "${OPT_BASE_HASH:-}" ]; then
     BASE_ARCHIVE=$(resolve_archive "base" "$OPT_BASE_HASH")
+    log I tools.base cache-pin "$(basename "$BASE_ARCHIVE")"
   else
     [ -z "${NODE_VER:-}" ] && fetch_tool_versions
     BASE_HASH=$(sha256 "base-node:$NODE_VER-rg:$RG_VER-micro:$MICRO_VER-$(cat "$PROJECT_ROOT/bin/claude-wrapper.sh")")
     BASE_ARCHIVE="$TOOLS_DIR/base-$BASE_HASH.tar.xz"
-    if [ ! -f "$BASE_ARCHIVE" ] || [ -n "${FORCE_PULL:-}" ]; then
-      echo "  Downloading node $NODE_VER, ripgrep $RG_VER, micro $MICRO_VER..." >&2
+    if [ -f "$BASE_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+      log I tools.base cache-hit "$(basename "$BASE_ARCHIVE")"
+    else
+      log I tools.base downloading "node $NODE_VER, ripgrep $RG_VER, micro $MICRO_VER"
       _DIR=$(mktemp -d)
 
       (curl -fsSL "https://nodejs.org/dist/v${NODE_VER}/node-v${NODE_VER}-linux-${ARCH_NODE}.tar.xz" \
@@ -135,21 +143,25 @@ build_tool_archives() {
 
       cp "$PROJECT_ROOT/bin/claude-wrapper.sh" "$_DIR/claude-wrapper"
       chmod +x "$_DIR/node" "$_DIR/rg" "$_DIR/micro" "$_DIR/claude-wrapper"
+      log I tools.base packing "$(basename "$BASE_ARCHIVE")"
       tar -C "$_DIR" -cJf "$BASE_ARCHIVE" node rg micro claude-wrapper
       rm -rf "$_DIR"
+      log I tools.base cached "$(basename "$BASE_ARCHIVE")"
     fi
   fi
-  echo "base:   $(basename "$BASE_ARCHIVE" .tar.xz | sed 's/^base-//')" >&2
 
   # ── Tier 2: Tool (pnpm + uv + uvx) ──
   if [ -n "${OPT_TOOL_HASH:-}" ]; then
     TOOL_ARCHIVE=$(resolve_archive "tool" "$OPT_TOOL_HASH")
+    log I tools.tool cache-pin "$(basename "$TOOL_ARCHIVE")"
   else
     [ -z "${PNPM_VER:-}" ] && fetch_tool_versions
     TOOL_HASH=$(sha256 "tool-pnpm:$PNPM_VER-uv:$UV_VER")
     TOOL_ARCHIVE="$TOOLS_DIR/tool-$TOOL_HASH.tar.xz"
-    if [ ! -f "$TOOL_ARCHIVE" ] || [ -n "${FORCE_PULL:-}" ]; then
-      echo "  Downloading pnpm $PNPM_VER, uv $UV_VER..." >&2
+    if [ -f "$TOOL_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+      log I tools.tool cache-hit "$(basename "$TOOL_ARCHIVE")"
+    else
+      log I tools.tool downloading "pnpm $PNPM_VER, uv $UV_VER"
       _DIR=$(mktemp -d)
 
       (curl -fsSL "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VER}/pnpm-${ARCH_PNPM}" \
@@ -161,28 +173,33 @@ build_tool_archives() {
       wait_all "$_PID1" "$_PID2"
 
       chmod +x "$_DIR/pnpm" "$_DIR/uv" "$_DIR/uvx"
+      log I tools.tool packing "$(basename "$TOOL_ARCHIVE")"
       tar -C "$_DIR" -cJf "$TOOL_ARCHIVE" pnpm uv uvx
       rm -rf "$_DIR"
+      log I tools.tool cached "$(basename "$TOOL_ARCHIVE")"
     fi
   fi
-  echo "tools:  $(basename "$TOOL_ARCHIVE" .tar.xz | sed 's/^tool-//')" >&2
 
   # ── Tier 3: Claude Code ──
   if [ -n "${OPT_CLAUDE_HASH:-}" ]; then
     CLAUDE_ARCHIVE=$(resolve_archive "claude" "$OPT_CLAUDE_HASH")
+    log I tools.claude cache-pin "$(basename "$CLAUDE_ARCHIVE")"
   else
     [ -z "${CLAUDE_VER:-}" ] && fetch_tool_versions
     CLAUDE_HASH=$(sha256 "claude-$CLAUDE_VER")
     CLAUDE_ARCHIVE="$TOOLS_DIR/claude-$CLAUDE_HASH.tar.xz"
-    if [ ! -f "$CLAUDE_ARCHIVE" ] || [ -n "${FORCE_PULL:-}" ]; then
-      echo "  Downloading claude $CLAUDE_VER..." >&2
+    if [ -f "$CLAUDE_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+      log I tools.claude cache-hit "$(basename "$CLAUDE_ARCHIVE")"
+    else
+      log I tools.claude downloading "claude $CLAUDE_VER"
       GCS_BUCKET="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
       _DIR=$(mktemp -d)
       curl -fsSL "$GCS_BUCKET/$CLAUDE_VER/$ARCH_CLAUDE/claude" -o "$_DIR/claude"
       chmod +x "$_DIR/claude"
+      log I tools.claude packing "$(basename "$CLAUDE_ARCHIVE")"
       tar -C "$_DIR" -cJf "$CLAUDE_ARCHIVE" claude
       rm -rf "$_DIR"
+      log I tools.claude cached "$(basename "$CLAUDE_ARCHIVE")"
     fi
   fi
-  echo "claude: $(basename "$CLAUDE_ARCHIVE" .tar.xz | sed 's/^claude-//')" >&2
 }

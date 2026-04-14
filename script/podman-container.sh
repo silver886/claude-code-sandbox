@@ -1,6 +1,13 @@
 #!/bin/sh
 set -eu
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Source init-launcher.sh first (which sources lib/log.sh) so `log` is
+# available for option-parse errors and stage markers below.
+. "$PROJECT_ROOT/lib/init-launcher.sh"
+
 OPT_BASE_HASH=""
 OPT_TOOL_HASH=""
 OPT_CLAUDE_HASH=""
@@ -14,29 +21,48 @@ while [ $# -gt 0 ]; do
     --claude-hash) OPT_CLAUDE_HASH="$2"; shift 2 ;;
     --force-pull)  FORCE_PULL=1; shift ;;
     --image)       BASE_IMAGE="$2"; shift 2 ;;
-    --allow-dnf)    ALLOW_DNF=1; shift ;;
-    *) echo "Unknown option: $1" >&2; exit 1 ;;
+    --allow-dnf)   ALLOW_DNF=1; shift ;;
+    *) log E launcher arg-parse "unknown option: $1"; exit 1 ;;
   esac
 done
 
+# SELinux detection: prefer `getenforce` (policycoreutils), fall back
+# to reading /sys/fs/selinux/enforce so we still apply label=disable on
+# hosts where the tool isn't installed but the LSM is active.
 SELINUX_OPT=""
-if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" != "Disabled" ]; then
+_SELINUX_STATE=""
+if command -v getenforce >/dev/null 2>&1; then
+  _SELINUX_STATE=$(getenforce 2>/dev/null)
+elif [ -r /sys/fs/selinux/enforce ]; then
+  case "$(cat /sys/fs/selinux/enforce 2>/dev/null)" in
+    1) _SELINUX_STATE=Enforcing ;;
+    0) _SELINUX_STATE=Permissive ;;
+  esac
+fi
+if [ -n "$_SELINUX_STATE" ] && [ "$_SELINUX_STATE" != "Disabled" ]; then
   SELINUX_OPT="--security-opt label=disable"
+  log I launcher selinux "detected $_SELINUX_STATE; using --security-opt label=disable"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-
-. "$PROJECT_ROOT/lib/init-launcher.sh"
 init_launcher
 
 # ── Build base image ──
 
-IMAGE_TAG="claude-base-$(sha256 "$(cat "$PROJECT_ROOT/Containerfile" "$PROJECT_ROOT/bin/enable-dnf.sh" "$PROJECT_ROOT/bin/setup-tools.sh" "$PROJECT_ROOT/config/sudoers-claude-enable-dnf")-$BASE_IMAGE")"
-if ! podman image exists "$IMAGE_TAG" 2>/dev/null || [ -n "${FORCE_PULL:-}" ]; then
+# Hash each input file independently and concatenate the digests so
+# file-boundary content can't collide when the contents are shifted.
+_IMG_HASHES=""
+for _f in Containerfile bin/enable-dnf.sh bin/setup-tools.sh config/sudoers-claude-enable-dnf; do
+  _IMG_HASHES="$_IMG_HASHES$(sha256 "$(cat "$PROJECT_ROOT/$_f")")"
+done
+IMAGE_TAG="claude-base-$(sha256 "$_IMG_HASHES-$BASE_IMAGE")"
+if podman image exists "$IMAGE_TAG" 2>/dev/null && [ -z "${FORCE_PULL:-}" ]; then
+  log I image cache-hit "$IMAGE_TAG"
+else
+  log I image build "$IMAGE_TAG"
   _BUILD_ARGS=""
   [ -n "${FORCE_PULL:-}" ] && _BUILD_ARGS="--no-cache"
   podman image build $_BUILD_ARGS $SELINUX_OPT --build-arg "BASE_IMAGE=$BASE_IMAGE" --tag "$IMAGE_TAG" "$PROJECT_ROOT"
+  log I image built "$IMAGE_TAG"
 fi
 
 # ── Run ──
@@ -66,6 +92,7 @@ for _d in $RO_DIRS; do
   set -- "$@" -v "$SYSTEM_DIR/ro/$_d:/etc/claude-code-sandbox/$_d:ro"
 done
 
+log I run launch "podman container run $IMAGE_TAG"
 podman container run --interactive --tty --rm \
   --userns=keep-id:uid=1000,gid=1000 \
   $SELINUX_OPT \

@@ -5,11 +5,16 @@ $ErrorActionPreference = 'Stop'
 
 $scriptDir = $PSScriptRoot
 $projectRoot = Split-Path $scriptDir
+. "$projectRoot\lib\Log.ps1"
 
 $configDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { [IO.Path]::Combine($HOME, '.claude') }
 $credPath = [IO.Path]::Combine($configDir, '.credentials.json')
+
+Write-Log I cred check $credPath
+
 if (-not [IO.File]::Exists($credPath)) {
-  throw 'Credentials file not found. Run "claude" to authenticate.'
+  Write-Log E cred fail 'credentials file not found; run "claude" to authenticate'
+  throw 'credentials file not found'
 }
 
 $credText = [IO.File]::ReadAllText($credPath)
@@ -25,15 +30,18 @@ catch {}
 
 $credJson.Dispose()
 if (-not $accessToken) {
-  throw 'No OAuth credentials. Run "claude" to authenticate.'
+  Write-Log E cred fail 'no OAuth credentials; run "claude" to authenticate'
+  throw 'no OAuth credentials'
 }
 
 $testReq = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, 'https://api.anthropic.com/api/oauth/claude_cli/roles')
 $testReq.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $accessToken)
 $testRes = $Http.SendAsync($testReq).Result
 if ($testRes.StatusCode -eq [Net.HttpStatusCode]::Unauthorized) {
+  Write-Log I cred refresh 'access token expired (HTTP 401)'
   if (-not $refreshToken) {
-    throw 'Token expired, no refresh token. Run "claude" to re-authenticate.'
+    Write-Log E cred fail 'token expired and no refresh token; run "claude" to re-authenticate'
+    throw 'no refresh token'
   }
 
   $oauthJson = [Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText([IO.Path]::Combine($projectRoot, 'config', 'oauth.json')))
@@ -49,16 +57,18 @@ if ($testRes.StatusCode -eq [Net.HttpStatusCode]::Unauthorized) {
     [Net.Http.StringContent]::new($bodyJson.ToJsonString(), [Text.Encoding]::UTF8, 'application/json')
   ).Result
   if (-not $refreshRes.IsSuccessStatusCode) {
-    throw "OAuth refresh failed (HTTP $($refreshRes.StatusCode)). Run ""claude"" to re-authenticate."
+    Write-Log E cred fail "OAuth refresh failed (HTTP $($refreshRes.StatusCode)); run 'claude' to re-authenticate"
+    throw "OAuth refresh failed (HTTP $($refreshRes.StatusCode))"
   }
 
   $refreshJson = [Text.Json.JsonDocument]::Parse($refreshRes.Content.ReadAsStringAsync().Result)
   $r = $refreshJson.RootElement
+  $expiresIn = $r.GetProperty('expires_in').GetInt64()
 
   $credNew = [Text.Json.Nodes.JsonNode]::Parse($credText)
   $credNew['claudeAiOauth']['accessToken'] = [Text.Json.Nodes.JsonValue]::Create($r.GetProperty('access_token').GetString())
   $credNew['claudeAiOauth']['expiresAt'] = [Text.Json.Nodes.JsonValue]::Create(
-    [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + $r.GetProperty('expires_in').GetInt64() * 1000
+    [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + $expiresIn * 1000
   )
 
   $newRefresh = try { $r.GetProperty('refresh_token').GetString() } catch { $null }
@@ -68,7 +78,12 @@ if ($testRes.StatusCode -eq [Net.HttpStatusCode]::Unauthorized) {
 
   $refreshJson.Dispose()
   [IO.File]::WriteAllText($credPath, $credNew.ToJsonString())
+  Write-Log I cred ok "refreshed (expires in ${expiresIn}s)"
 }
-elseif ($testRes.StatusCode -ne [Net.HttpStatusCode]::OK) {
-  throw "Credential check failed (HTTP $($testRes.StatusCode))."
+elseif ($testRes.StatusCode -eq [Net.HttpStatusCode]::OK) {
+  Write-Log I cred ok 'access token valid'
+}
+else {
+  Write-Log E cred fail "credential check failed (HTTP $($testRes.StatusCode))"
+  throw "credential check failed (HTTP $($testRes.StatusCode))"
 }

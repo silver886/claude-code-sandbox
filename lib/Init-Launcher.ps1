@@ -6,17 +6,31 @@
 # tool archive build.
 #
 # Also provides:
-#   $wslSrc — convert a Windows path to a WSL absolute path
+#   Invoke-Must — run a native command and throw if its exit code is
+#                 non-zero. Stdout is passed through to the caller.
+#   $wslSrc     — convert a Windows path to a WSL absolute path
 #
 # Caller must set $optBaseHash, $optToolHash, $optClaudeHash, $forcePull
 # before invoking $initLauncher.
 
+function Invoke-Must {
+  $cmd = $args[0]
+  $cmdArgs = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }
+  & $cmd @cmdArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "Command failed (exit $LASTEXITCODE): $cmd $($cmdArgs -join ' ')"
+  }
+}
+
+# Log.ps1 first so every downstream lib can call Write-Log.
+. "$projectRoot\lib\Log.ps1"
 . "$projectRoot\lib\Init-Config.ps1"
 . "$projectRoot\lib\Tools.ps1"
 
 $wslSrc = { param($p) Invoke-Must wsl wslpath -a ($p.Replace('\', '/')) }
 
 $initLauncher = {
+  Write-Log I launcher start "claude-code-sandbox $($MyInvocation.ScriptName)"
   & "$projectRoot\lib\Ensure-Credential.ps1"
   . $initConfigDir
   . $detectArch

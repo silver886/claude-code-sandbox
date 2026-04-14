@@ -19,6 +19,8 @@ $forcePull = $ForcePull.IsPresent
 . $initLauncher
 . $buildBaseImage
 
+Write-Log I run launch "podman container run $imageTag"
+
 # ── Run ──
 #
 # System config assembly via podman -v stacking (no in-container privileges):

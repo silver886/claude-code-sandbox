@@ -63,7 +63,7 @@ _realpath() {
   while [ -L "$_p" ]; do
     _n=$((_n + 1))
     if [ "$_n" -gt "$_SYMLOOP_MAX" ]; then
-      echo "Symlink chain too deep: $1" >&2; return 1
+      log E config fail "symlink chain too deep: $1"; return 1
     fi
     _d=$(cd -P "$(dirname "$_p")" && pwd)
     _p=$(readlink "$_p")
@@ -92,7 +92,7 @@ _stage_rw_file() {
   _src=$(_realpath "$1")
   _dest="$2"
   ln -f "$_src" "$_dest" || {
-    echo "Cannot hardlink $_src -> $_dest (cross-filesystem?). Writable config requires same filesystem for host sync." >&2
+    log E config fail "cannot hardlink $_src -> $_dest (cross-filesystem?); writable config requires same filesystem for host sync"
     exit 1
   }
 }
@@ -104,21 +104,25 @@ _resolve_dir() {
 }
 
 init_config_dir() {
+  log I config start "staging $PWD/.claude/.system"
   CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
   if [ ! -d "$CONFIG_DIR" ]; then
-    echo "Claude config directory not found: $CONFIG_DIR" >&2; exit 1
+    log E config fail "Claude config directory not found: $CONFIG_DIR"
+    exit 1
   fi
 
   SYSTEM_DIR="$PWD/.claude/.system"
 
-  # Warn if the project has a .gitignore that doesn't exclude the
-  # system bucket — credentials and per-project session history live
-  # there and absolutely should not be committed. Match either an
-  # explicit `.claude/.system` entry or any parent that already
-  # excludes it (`.claude` / `.claude/`). Don't modify user files;
-  # just print the warning once per launch.
-  if [ -f "$PWD/.gitignore" ] && ! grep -qE '^[[:space:]]*/?\.claude(/(\.system)?/?)?[[:space:]]*$' "$PWD/.gitignore" 2>/dev/null; then
-    echo "warning: $PWD/.gitignore does not exclude .claude/.system/ — your hardlinked credentials and session history live there. Add: .claude/.system/" >&2
+  # Warn if the project is a git repo (or worktree) and nothing in
+  # .gitignore excludes the system bucket — credentials and per-project
+  # session history live there and absolutely should not be committed.
+  # Match either an explicit `.claude/.system` entry or any parent that
+  # already excludes it (`.claude` / `.claude/`). Don't modify user
+  # files; just print the warning once per launch. Fires both when
+  # .gitignore is missing entirely AND when it exists without a match.
+  if [ -e "$PWD/.git" ] && { [ ! -f "$PWD/.gitignore" ] || \
+       ! grep -qE '^[[:space:]]*/?\.claude(/(\.system)?/?)?[[:space:]]*$' "$PWD/.gitignore" 2>/dev/null; }; then
+    log W config gitignore "$PWD/.gitignore does not exclude .claude/.system/; add a '.claude/.system/' entry to keep credentials and session history out of commits"
   fi
 
   mkdir -p "$SYSTEM_DIR/rw" "$SYSTEM_DIR/cr" "$SYSTEM_DIR/.mask"
@@ -146,6 +150,9 @@ init_config_dir() {
   done
 
   # Read-only directories (flat). Each $CONFIG_DIR/<d> may be a symlink chain.
+  # Note: the `*` glob below intentionally skips dotfiles (e.g. a
+  # stray `.gitkeep`). Only top-level regular files are staged — no
+  # recursion, no hidden entries.
   RO_DIRS=""
   for _d in rules commands agents output-styles; do
     [ -d "$CONFIG_DIR/$_d" ] || continue
@@ -192,4 +199,5 @@ init_config_dir() {
   for _d in $RO_DIRS; do
     mkdir -p "$SYSTEM_DIR/cr/$_d"
   done
+  log I config done "rw=$(echo $CONFIG_FILES | wc -w | tr -d ' ') ro-files=$(echo $RO_FILES | wc -w | tr -d ' ') ro-dirs=$(echo $RO_DIRS | wc -w | tr -d ' ')"
 }

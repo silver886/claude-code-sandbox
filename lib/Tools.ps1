@@ -7,6 +7,9 @@ $sha256 = {
   ).Replace('-', '').ToLower()
 }
 
+# Structured logging is provided by Write-Log in lib/Log.ps1, dot-sourced
+# from Init-Launcher.ps1.
+
 $http = [Net.Http.HttpClient]::new()
 $http.DefaultRequestHeaders.UserAgent.ParseAdd('claude-code-sandbox/1.0')
 
@@ -34,7 +37,10 @@ $detectArch = {
       $script:archPnpm = 'linux-arm64'
       $script:archClaude = 'linux-arm64'
     }
-    default { throw "Unsupported architecture: $osArch" }
+    default {
+      Write-Log E tools fail "unsupported architecture: $osArch"
+      throw "unsupported architecture: $osArch"
+    }
   }
 }
 
@@ -74,10 +80,18 @@ $fetchToolVersions = {
 }
 
 $resolveArchive = { param($tier, $prefix)
-  $matches = @(Get-ChildItem "$toolsDir\${tier}-${prefix}*.tar.xz" -ErrorAction SilentlyContinue)
-  if ($matches.Count -eq 0) { throw "No cached archive found for $tier hash '$prefix'" }
-  if ($matches.Count -gt 1) { throw "Ambiguous hash prefix '$prefix' -- matches multiple $tier archives" }
-  $matches[0].FullName
+  # Note: don't name this $matches — that's a PowerShell automatic
+  # variable populated by -match / -replace.
+  $cached = @(Get-ChildItem "$toolsDir\${tier}-${prefix}*.tar.xz" -ErrorAction SilentlyContinue)
+  if ($cached.Count -eq 0) {
+    Write-Log E "tools.$tier" fail "no cached archive matching hash '$prefix'"
+    throw "no cached $tier archive matching hash '$prefix'"
+  }
+  if ($cached.Count -gt 1) {
+    Write-Log E "tools.$tier" fail "ambiguous hash prefix '$prefix' matches multiple archives"
+    throw "ambiguous $tier hash prefix '$prefix'"
+  }
+  $cached[0].FullName
 }
 
 $buildToolArchives = {
@@ -86,13 +100,21 @@ $buildToolArchives = {
   # ── Tier 1: Base ──
   if ($optBaseHash) {
     $script:baseArchive = & $resolveArchive 'base' $optBaseHash
+    Write-Log I tools.base cache-pin (Split-Path -Leaf $baseArchive)
   }
   else {
     if (-not $script:nodeVer) { . $fetchToolVersions }
-    $baseHash = & $sha256 "base-node:$nodeVer-rg:$rgVer-micro:$microVer-$([IO.File]::ReadAllText("$projectRoot\bin\claude-wrapper.sh"))"
+    # Normalize line endings: the .sh launcher reads this file via raw
+    # `cat`, so a CRLF checkout on Windows would otherwise produce a
+    # different cache hash for the same canonical source.
+    $wrapperSrc = ([IO.File]::ReadAllText("$projectRoot\bin\claude-wrapper.sh")).Replace("`r`n", "`n")
+    $baseHash = & $sha256 "base-node:$nodeVer-rg:$rgVer-micro:$microVer-$wrapperSrc"
     $script:baseArchive = "$toolsDir\base-$baseHash.tar.xz"
-    if (-not [IO.File]::Exists($baseArchive) -or $forcePull) {
-      Write-Host "  Downloading node $nodeVer, ripgrep $rgVer, micro $microVer..." -ForegroundColor DarkGray
+    if ([IO.File]::Exists($baseArchive) -and -not $forcePull) {
+      Write-Log I tools.base cache-hit (Split-Path -Leaf $baseArchive)
+    }
+    else {
+      Write-Log I tools.base downloading "node $nodeVer, ripgrep $rgVer, micro $microVer"
       $tmpDir = Join-Path ([IO.Path]::GetTempPath()) "claude-build-$(Get-Random)"
       [IO.Directory]::CreateDirectory($tmpDir) > $null
       try {
@@ -119,23 +141,28 @@ $buildToolArchives = {
         Remove-Item $microTmp
 
         Copy-Item "$projectRoot\bin\claude-wrapper.sh" "$tmpDir\claude-wrapper"
+        Write-Log I tools.base packing (Split-Path -Leaf $baseArchive)
         tar -cJf $baseArchive -C $tmpDir node rg micro claude-wrapper
+        Write-Log I tools.base cached (Split-Path -Leaf $baseArchive)
       }
       finally { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
     }
   }
-  Write-Host "base:   $(Split-Path -Leaf $baseArchive)" -ForegroundColor DarkGray
 
   # ── Tier 2: Tool ──
   if ($optToolHash) {
     $script:toolArchive = & $resolveArchive 'tool' $optToolHash
+    Write-Log I tools.tool cache-pin (Split-Path -Leaf $toolArchive)
   }
   else {
     if (-not $script:pnpmVer) { . $fetchToolVersions }
     $toolHash = & $sha256 "tool-pnpm:$pnpmVer-uv:$uvVer"
     $script:toolArchive = "$toolsDir\tool-$toolHash.tar.xz"
-    if (-not [IO.File]::Exists($toolArchive) -or $forcePull) {
-      Write-Host "  Downloading pnpm $pnpmVer, uv $uvVer..." -ForegroundColor DarkGray
+    if ([IO.File]::Exists($toolArchive) -and -not $forcePull) {
+      Write-Log I tools.tool cache-hit (Split-Path -Leaf $toolArchive)
+    }
+    else {
+      Write-Log I tools.tool downloading "pnpm $pnpmVer, uv $uvVer"
       $tmpDir = Join-Path ([IO.Path]::GetTempPath()) "claude-build-$(Get-Random)"
       [IO.Directory]::CreateDirectory($tmpDir) > $null
       try {
@@ -148,33 +175,39 @@ $buildToolArchives = {
         tar -xzf $uvTmp -C $tmpDir --strip-components=1
         Remove-Item $uvTmp
 
+        Write-Log I tools.tool packing (Split-Path -Leaf $toolArchive)
         tar -cJf $toolArchive -C $tmpDir pnpm uv uvx
+        Write-Log I tools.tool cached (Split-Path -Leaf $toolArchive)
       }
       finally { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
     }
   }
-  Write-Host "tools:  $(Split-Path -Leaf $toolArchive)" -ForegroundColor DarkGray
 
   # ── Tier 3: Claude ──
   if ($optClaudeHash) {
     $script:claudeArchive = & $resolveArchive 'claude' $optClaudeHash
+    Write-Log I tools.claude cache-pin (Split-Path -Leaf $claudeArchive)
   }
   else {
     if (-not $script:claudeVer) { . $fetchToolVersions }
     $claudeHash = & $sha256 "claude-$claudeVer"
     $script:claudeArchive = "$toolsDir\claude-$claudeHash.tar.xz"
-    if (-not [IO.File]::Exists($claudeArchive) -or $forcePull) {
-      Write-Host "  Downloading claude $claudeVer..." -ForegroundColor DarkGray
+    if ([IO.File]::Exists($claudeArchive) -and -not $forcePull) {
+      Write-Log I tools.claude cache-hit (Split-Path -Leaf $claudeArchive)
+    }
+    else {
+      Write-Log I tools.claude downloading "claude $claudeVer"
       $gcsBucket = 'https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases'
       $tmpDir = Join-Path ([IO.Path]::GetTempPath()) "claude-build-$(Get-Random)"
       [IO.Directory]::CreateDirectory($tmpDir) > $null
       try {
         $claudeBytes = $http.GetByteArrayAsync("$gcsBucket/$claudeVer/$archClaude/claude").Result
         [IO.File]::WriteAllBytes("$tmpDir\claude", $claudeBytes)
+        Write-Log I tools.claude packing (Split-Path -Leaf $claudeArchive)
         tar -cJf $claudeArchive -C $tmpDir claude
+        Write-Log I tools.claude cached (Split-Path -Leaf $claudeArchive)
       }
       finally { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
     }
   }
-  Write-Host "claude: $(Split-Path -Leaf $claudeArchive)" -ForegroundColor DarkGray
 }

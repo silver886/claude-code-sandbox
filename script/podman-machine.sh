@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+. "$PROJECT_ROOT/lib/init-launcher.sh"
+
 OPT_BASE_HASH=""
 OPT_TOOL_HASH=""
 OPT_CLAUDE_HASH=""
@@ -20,8 +25,8 @@ while [ $# -gt 0 ]; do
     --cpus)        MACHINE_CPUS="$2"; shift 2 ;;
     --memory)      MACHINE_MEMORY="$2"; shift 2 ;;
     --disk-size)   MACHINE_DISK_SIZE="$2"; shift 2 ;;
-    --allow-dnf)    ALLOW_DNF=1; shift ;;
-    *) echo "Unknown option: $1" >&2; exit 1 ;;
+    --allow-dnf)   ALLOW_DNF=1; shift ;;
+    *) log E launcher arg-parse "unknown option: $1"; exit 1 ;;
   esac
 done
 MACHINE_ARGS=""
@@ -30,18 +35,15 @@ MACHINE_ARGS=""
 [ -n "$MACHINE_DISK_SIZE" ] && MACHINE_ARGS="$MACHINE_ARGS --disk-size $MACHINE_DISK_SIZE"
 [ -n "$BASE_IMAGE" ]        && MACHINE_ARGS="$MACHINE_ARGS --image $BASE_IMAGE"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-
 # Tear the VM down on any exit. The project's .claude/.system layout
 # persists on the host — nothing to clean up there.
 MACHINE_NAME=""
 trap '
+  [ -n "$MACHINE_NAME" ] && log I vm teardown "$MACHINE_NAME"
   [ -n "$MACHINE_NAME" ] && podman machine stop "$MACHINE_NAME" 2>/dev/null || true
   [ -n "$MACHINE_NAME" ] && podman machine rm -f "$MACHINE_NAME" 2>/dev/null || true
 ' EXIT
 
-. "$PROJECT_ROOT/lib/init-launcher.sh"
 init_launcher
 
 # ── Runtime VM ──
@@ -65,13 +67,16 @@ stop_all_machines
 # (containing hardlinks to the canonical config files) rides along
 # inside the workdir, so the in-VM bind layer in setup-system-mounts.sh
 # can reach them without exposing all of $CONFIG_DIR.
+log I vm init "$MACHINE_NAME"
 podman machine init "$MACHINE_NAME" $MACHINE_ARGS \
   --volume "$PWD:/var/workdir"
+log I vm start "$MACHINE_NAME"
 podman machine start "$MACHINE_NAME"
 
 # Push setup-system-mounts.sh into the VM and run it as root. claude
 # itself is launched below as the unprivileged `core` user — sudo is
 # only used here to do the mount syscalls.
+log I mounts assemble "/etc/claude-code-sandbox"
 cat "$PROJECT_ROOT/bin/setup-system-mounts.sh" | podman machine ssh "$MACHINE_NAME" \
   'cat > /tmp/setup-system-mounts.sh && chmod +x /tmp/setup-system-mounts.sh'
 podman machine ssh "$MACHINE_NAME" \
@@ -83,6 +88,7 @@ podman machine ssh "$MACHINE_NAME" \
      --ro-dirs '$RO_DIRS'"
 
 # Inject setup script and tool archives, then run setup
+log I archive inject "base+tool+claude tarballs"
 cat "$PROJECT_ROOT/bin/setup-tools.sh" | podman machine ssh "$MACHINE_NAME" \
   'cat > /tmp/setup-tools.sh && chmod +x /tmp/setup-tools.sh'
 _ARCHIVE_ARGS=""
@@ -105,6 +111,7 @@ SSH_PORT=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.Port}}'
 SSH_KEY=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.IdentityPath}}')
 _ENV="CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox"
 [ -n "$ALLOW_DNF" ] && _ENV="$_ENV CLAUDE_ENABLE_DNF=1"
+log I run launch "ssh -tt core@localhost (machine $MACHINE_NAME)"
 ssh -tt -p "$SSH_PORT" -i "$SSH_KEY" \
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
   core@localhost \

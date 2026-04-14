@@ -30,6 +30,12 @@
 #      the binds in 2-4 capture the real host inodes before the mask
 set -eu
 
+# Inline structured logger — same format as lib/log.sh.
+log() {
+  printf '%s %s %-16s %-14s %s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$1" "$2" "$3" "$4" >&2
+}
+
 WORKDIR=/var/workdir
 TARGET=/etc/claude-code-sandbox
 CONFIG_FILES=""
@@ -42,13 +48,23 @@ while [ $# -gt 0 ]; do
     --config-files) CONFIG_FILES="$2"; shift 2 ;;
     --ro-files)     RO_FILES="$2"; shift 2 ;;
     --ro-dirs)      RO_DIRS="$2"; shift 2 ;;
-    *) echo "Unknown option: $1" >&2; exit 1 ;;
+    *) log E mounts arg-parse "unknown option: $1"; exit 1 ;;
   esac
 done
 
 SYSTEM="$WORKDIR/.claude/.system"
 
+log I mounts start "target=$TARGET source=$SYSTEM"
+
 mkdir -p "$TARGET"
+
+# Idempotency guard: if $TARGET is already a mountpoint we've already
+# assembled it in this VM/distro. Re-running would stack another set
+# of binds. Safe to skip — the existing layer already serves Claude.
+if mountpoint -q "$TARGET" 2>/dev/null; then
+  log I mounts skip "$TARGET already mounted"
+  exit 0
+fi
 
 # Step 2: cr/ as the base mount. Anything Claude creates under
 # CLAUDE_CONFIG_DIR (sessions, backups, …) is written to this bucket and
@@ -87,3 +103,5 @@ done
 # silently no-op when nested inside another bind in some environments.
 mount --bind "$SYSTEM/.mask" "$SYSTEM"
 mount -o remount,bind,ro "$SYSTEM"
+
+log I mounts done "rw=$(echo $CONFIG_FILES | wc -w | tr -d ' ') ro-files=$(echo $RO_FILES | wc -w | tr -d ' ') ro-dirs=$(echo $RO_DIRS | wc -w | tr -d ' ')"

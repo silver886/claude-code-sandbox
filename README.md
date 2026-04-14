@@ -131,8 +131,6 @@ The single `$PWD → /var/workdir` mount on the VM/WSL2 backends is what avoids 
 - **podman-machine.sh** — hashes `$PWD` to derive a machine name, stops any other running machine (Podman only allows one), inits a fresh VM with a single `$PWD → /var/workdir` virtio-fs volume. After start, pipes `bin/setup-system-mounts.sh` in over SSH and runs it as root to assemble `/etc/claude-code-sandbox` (and bind the `.mask/` over `.system/`). Then injects the three tool archives, runs `bin/setup-tools.sh`, and opens an interactive `ssh -tt` session running `claude` as `core`. An `EXIT` trap stops and removes the machine no matter how the session ends.
 - **wsl.ps1** — hashes `$PWD` to derive a distro name, imports the Podman base image as a WSL tarball, runs `bin/setup-tools.sh` via `wsl -u root` to extract the archives into `$HOME/.local/bin`, **bakes `bin/setup-system-mounts.sh` into the distro at `/usr/local/libexec/claude-code-sandbox/setup-system-mounts.sh`** (must happen here while `/mnt/c` is still automounted), installs `config/wsl.conf` to disable automount and Windows interop, then on every launch mounts the Windows workdir via `drvfs` and runs the in-distro `setup-system-mounts.sh` as root to assemble `/etc/claude-code-sandbox`, then runs Claude and unregisters the distro on exit. A stamp file (`.archive-hash`) — keyed on the tool archives, the base image, `wsl.conf`, **and `setup-system-mounts.sh`** — is kept so repeated runs on the same workdir can reuse the distro unless any of those change.
 
-If you have stale per-session staging dirs from a previous version under `$XDG_CACHE_HOME/claude-code-sandbox/config-*` (or `%LOCALAPPDATA%\.cache\claude-code-sandbox\config-*`), it is safe to `rm -rf` them — they are no longer used.
-
 ## Requirements
 
 - **Linux/macOS:** `podman`, `curl`, `jq`, `tar`, `sha256sum` (or `shasum`). For `podman-machine.sh`, a working `podman machine` provider (qemu/applehv/hyperv).
@@ -143,3 +141,4 @@ If you have stale per-session staging dirs from a previous version under `$XDG_C
 
 - `--dangerously-skip-permissions` is still dangerous *inside* the sandbox — the agent can freely trash `/var/workdir`, which is your real project directory. Commit or stash first if that matters to you.
 - Only `linux/amd64` and `linux/arm64` tool archives are built.
+- `podman-machine.sh` stops every other running podman machine on launch (Podman supports only one VM at a time) and does not restart them on exit — you'll need to `podman machine start <name>` your previous machine yourself afterward.

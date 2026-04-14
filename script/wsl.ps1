@@ -43,10 +43,14 @@ try {
   }
 
   if ($needsImport) {
-    if ($distroExists) { wsl --unregister $distroName 2>$null }
+    if ($distroExists) {
+      Write-Log I distro unregister $distroName
+      wsl --unregister $distroName 2>$null
+    }
 
     # Build base image and export as tarball for WSL import
     . $buildBaseImage
+    Write-Log I distro export "$imageTag -> claude-base.tar"
     $exportCtr = (Invoke-Must podman container create $imageTag true)
     try {
       Invoke-Must podman container export $exportCtr -o "$env:TEMP\claude-base.tar"
@@ -57,6 +61,7 @@ try {
 
     [IO.Directory]::CreateDirectory($distroDir) > $null
     try {
+      Write-Log I distro import $distroName
       Invoke-Must wsl --import $distroName $distroDir "$env:TEMP\claude-base.tar"
     }
     finally {
@@ -64,6 +69,7 @@ try {
     }
 
     # Extract tool archives and set up binaries (before disabling automount — needs /mnt/c/)
+    Write-Log I archive inject "base+tool+claude tarballs"
     $wslSetup = & $wslSrc "$projectRoot\bin\setup-tools.sh"
     $wslArchives = @()
     foreach ($archive in $baseArchive, $toolArchive, $claudeArchive) {
@@ -95,6 +101,7 @@ try {
   # to the canonical config files, populated by init-config on every
   # launch) rides along, and the in-distro setup script binds from there.
 
+  Write-Log I distro mount "$($PWD.Path) -> /var/workdir"
   $winWorkdir = $PWD.Path
   Invoke-Must wsl -d $distroName -u root -- sh -c "
     mkdir -p /var/workdir &&
@@ -105,6 +112,7 @@ try {
   # (installed during the import block above). claude itself is launched
   # below as the unprivileged claude user — sudo/root is only used here
   # to do the mount syscalls.
+  Write-Log I mounts assemble "/etc/claude-code-sandbox"
   Invoke-Must wsl -d $distroName -u root -- /usr/local/libexec/claude-code-sandbox/setup-system-mounts.sh `
     --workdir /var/workdir `
     --target /etc/claude-code-sandbox `
@@ -117,12 +125,14 @@ try {
   $envArgs = 'CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox'
   if ($AllowDnf) { $envArgs += ' CLAUDE_ENABLE_DNF=1' }
 
+  Write-Log I run launch "wsl -d $distroName"
   Invoke-Must wsl -d $distroName --cd /var/workdir -- sh -c "
     exec env $envArgs `$HOME/.local/bin/claude --dangerously-skip-permissions
   "
 }
 finally {
   if ($distroName) {
+    Write-Log I distro teardown $distroName
     try { wsl --terminate $distroName 2>$null } catch {}
     try { wsl --unregister $distroName 2>$null } catch {}
   }
