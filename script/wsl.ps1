@@ -4,9 +4,14 @@ param(
   [string]$ClaudeHash = '',
   [switch]$ForcePull,
   [string]$Image = 'fedora:latest',
-  [switch]$AllowDnf
+  [switch]$AllowDnf,
+  [ValidateSet('I', 'W', 'E')][string]$LogLevel = 'W'
 )
 $ErrorActionPreference = 'Stop'
+
+# Script-scoped LogLevel for Write-Log to read. No env var write,
+# no caller pollution — dies with the script.
+$script:LogLevel = $LogLevel
 
 $scriptDir = $PSScriptRoot
 $projectRoot = Split-Path $scriptDir
@@ -75,7 +80,7 @@ try {
     foreach ($archive in $baseArchive, $toolArchive, $claudeArchive) {
       $wslArchives += & $wslSrc $archive
     }
-    Invoke-Must wsl -d $distroName -u root -- env CLAUDE_BIN_DIR=/home/claude/.local/bin sh $wslSetup @wslArchives
+    Invoke-Must wsl -d $distroName -u root -- env "LOG_LEVEL=$LogLevel" CLAUDE_BIN_DIR=/home/claude/.local/bin sh $wslSetup @wslArchives
 
     # Bake setup-system-mounts.sh into the distro at a stable in-distro
     # path. Must happen here (while /mnt/c is still available via
@@ -113,7 +118,8 @@ try {
   # below as the unprivileged claude user — sudo/root is only used here
   # to do the mount syscalls.
   Write-Log I mounts assemble "/etc/claude-code-sandbox"
-  Invoke-Must wsl -d $distroName -u root -- /usr/local/libexec/claude-code-sandbox/setup-system-mounts.sh `
+  Invoke-Must wsl -d $distroName -u root -- env "LOG_LEVEL=$LogLevel" `
+    /usr/local/libexec/claude-code-sandbox/setup-system-mounts.sh `
     --workdir /var/workdir `
     --target /etc/claude-code-sandbox `
     --config-files "$($configFiles -join ' ')" `
@@ -122,7 +128,7 @@ try {
 
   # ── Launch ──
 
-  $envArgs = 'CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox'
+  $envArgs = "CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox LOG_LEVEL=$LogLevel"
   if ($AllowDnf) { $envArgs += ' CLAUDE_ENABLE_DNF=1' }
 
   Write-Log I run launch "wsl -d $distroName"

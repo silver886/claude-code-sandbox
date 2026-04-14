@@ -30,8 +30,12 @@
 #      the binds in 2-4 capture the real host inodes before the mask
 set -eu
 
-# Inline structured logger — same format as lib/log.sh.
+# Inline structured logger — same format and threshold semantics as
+# lib/log.sh. $LOG_LEVEL inherited from the parent launcher.
 log() {
+  _t=2; case "${LOG_LEVEL:-W}" in I) _t=1 ;; E) _t=3 ;; esac
+  _m=1; case "$1"               in W) _m=2 ;; E) _m=3 ;; esac
+  [ "$_m" -lt "$_t" ] && return 0
   printf '%s %s %-16s %-14s %s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$1" "$2" "$3" "$4" >&2
 }

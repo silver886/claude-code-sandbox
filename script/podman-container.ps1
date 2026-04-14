@@ -4,9 +4,14 @@ param(
   [string]$ClaudeHash = '',
   [switch]$ForcePull,
   [string]$Image = 'fedora:latest',
-  [switch]$AllowDnf
+  [switch]$AllowDnf,
+  [ValidateSet('I', 'W', 'E')][string]$LogLevel = 'W'
 )
 $ErrorActionPreference = 'Stop'
+
+# Script-scoped LogLevel for Write-Log to read. No env var write,
+# no caller pollution — dies with the script.
+$script:LogLevel = $LogLevel
 
 $scriptDir = $PSScriptRoot
 $projectRoot = Split-Path $scriptDir
@@ -34,6 +39,7 @@ Write-Log I run launch "podman container run $imageTag"
 $systemDirWsl = & $wslSrc $systemDir
 $extraArgs = @(
   '--env', 'CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox',
+  '--env', "LOG_LEVEL=$LogLevel",
   '-v', "${systemDirWsl}/cr:/etc/claude-code-sandbox"
 )
 foreach ($f in $configFiles) {

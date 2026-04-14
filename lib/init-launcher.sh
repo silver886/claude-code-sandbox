@@ -20,7 +20,10 @@
 
 init_launcher() {
   log I launcher start "claude-code-sandbox $0"
-  "$PROJECT_ROOT/lib/ensure-credential.sh"
+  # Inject LOG_LEVEL into the credential subprocess explicitly. The
+  # launcher keeps LOG_LEVEL as a plain shell var (not exported), so
+  # the only way the child sees it is via this leading assignment.
+  LOG_LEVEL="${LOG_LEVEL:-W}" "$PROJECT_ROOT/lib/ensure-credential.sh"
   init_config_dir
   detect_arch
   build_tool_archives

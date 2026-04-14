@@ -4,6 +4,22 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$(dirname "$SCRIPT_DIR")/lib/log.sh"
 
+# Standalone --log-level support. When invoked from the launcher,
+# init_launcher() prefixes the call with `LOG_LEVEL=$LOG_LEVEL …` to
+# inject the value into this subprocess's env-derived shell var. The
+# loop below is a no-op in that path; standalone callers can pass
+# --log-level themselves.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --log-level) LOG_LEVEL="$2"; shift 2 ;;
+    *) log E cred arg-parse "unknown option: $1"; exit 1 ;;
+  esac
+done
+case "${LOG_LEVEL:-W}" in
+  I|W|E) ;;
+  *) log E cred arg-parse "invalid --log-level: $LOG_LEVEL (want I, W, or E)"; exit 1 ;;
+esac
+
 CRED_PATH="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
 
 log I cred check "$CRED_PATH"

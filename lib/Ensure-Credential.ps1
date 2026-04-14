@@ -1,7 +1,14 @@
 param(
-  [Net.Http.HttpClient]$Http = [Net.Http.HttpClient]::new()
+  [Net.Http.HttpClient]$Http = [Net.Http.HttpClient]::new(),
+  # The launcher passes -LogLevel explicitly. Standalone callers can
+  # omit it and get the default (W).
+  [ValidateSet('I', 'W', 'E')][string]$LogLevel = 'W'
 )
 $ErrorActionPreference = 'Stop'
+
+# Script-scoped LogLevel for Write-Log to read. No env var write,
+# no caller pollution — dies with this script.
+$script:LogLevel = $LogLevel
 
 $scriptDir = $PSScriptRoot
 $projectRoot = Split-Path $scriptDir

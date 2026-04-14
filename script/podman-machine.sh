@@ -26,9 +26,14 @@ while [ $# -gt 0 ]; do
     --memory)      MACHINE_MEMORY="$2"; shift 2 ;;
     --disk-size)   MACHINE_DISK_SIZE="$2"; shift 2 ;;
     --allow-dnf)   ALLOW_DNF=1; shift ;;
+    --log-level)   LOG_LEVEL="$2"; shift 2 ;;
     *) log E launcher arg-parse "unknown option: $1"; exit 1 ;;
   esac
 done
+case "${LOG_LEVEL:-W}" in
+  I|W|E) ;;
+  *) log E launcher arg-parse "invalid --log-level: $LOG_LEVEL (want I, W, or E)"; exit 1 ;;
+esac
 MACHINE_ARGS=""
 [ -n "$MACHINE_CPUS" ]      && MACHINE_ARGS="$MACHINE_ARGS --cpus $MACHINE_CPUS"
 [ -n "$MACHINE_MEMORY" ]    && MACHINE_ARGS="$MACHINE_ARGS --memory $MACHINE_MEMORY"
@@ -80,7 +85,7 @@ log I mounts assemble "/etc/claude-code-sandbox"
 cat "$PROJECT_ROOT/bin/setup-system-mounts.sh" | podman machine ssh "$MACHINE_NAME" \
   'cat > /tmp/setup-system-mounts.sh && chmod +x /tmp/setup-system-mounts.sh'
 podman machine ssh "$MACHINE_NAME" \
-  "sudo /tmp/setup-system-mounts.sh \
+  "export LOG_LEVEL=${LOG_LEVEL:-W} && sudo --preserve-env=LOG_LEVEL /tmp/setup-system-mounts.sh \
      --workdir /var/workdir \
      --target /etc/claude-code-sandbox \
      --config-files '$CONFIG_FILES' \
@@ -97,7 +102,7 @@ for _archive in "$BASE_ARCHIVE" "$TOOL_ARCHIVE" "$CLAUDE_ARCHIVE"; do
   cat "$_archive" | podman machine ssh "$MACHINE_NAME" "cat > /tmp/$_name"
   _ARCHIVE_ARGS="$_ARCHIVE_ARGS /tmp/$_name"
 done
-podman machine ssh "$MACHINE_NAME" "/tmp/setup-tools.sh$_ARCHIVE_ARGS"
+podman machine ssh "$MACHINE_NAME" "LOG_LEVEL=${LOG_LEVEL:-W} /tmp/setup-tools.sh$_ARCHIVE_ARGS"
 
 # ── Launch ──
 #
@@ -109,7 +114,7 @@ podman machine ssh "$MACHINE_NAME" "/tmp/setup-tools.sh$_ARCHIVE_ARGS"
 # after claude exits.
 SSH_PORT=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.Port}}')
 SSH_KEY=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.IdentityPath}}')
-_ENV="CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox"
+_ENV="CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox LOG_LEVEL=${LOG_LEVEL:-W}"
 [ -n "$ALLOW_DNF" ] && _ENV="$_ENV CLAUDE_ENABLE_DNF=1"
 log I run launch "ssh -tt core@localhost (machine $MACHINE_NAME)"
 ssh -tt -p "$SSH_PORT" -i "$SSH_KEY" \

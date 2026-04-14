@@ -40,7 +40,35 @@ else
   _log_ts() { date -u +%Y-%m-%dT%H:%M:%S.000Z; }
 fi
 
+# Threshold filtering reads `$LOG_LEVEL` as a plain shell variable
+# (not an env var) — it lives in the launcher process and dies with
+# it. Child processes that need to inherit the level get LOG_LEVEL
+# injected explicitly at the boundary call site:
+#
+#   ensure-credential.sh   LOG_LEVEL=$LOG_LEVEL ./lib/ensure-credential.sh
+#   podman container       podman run --env LOG_LEVEL=$LOG_LEVEL …
+#   podman machine ssh     ssh "export LOG_LEVEL=$LOG_LEVEL && cmd"
+#   wsl -u root            wsl … env LOG_LEVEL=$LOG_LEVEL cmd
+#   sudo (in sandbox)      sudo --preserve-env=LOG_LEVEL cmd  (env set by podman --env)
+#
+# The bin/* in-sandbox scripts read LOG_LEVEL from their *process
+# environment* (delivered by podman --env / wsl env / sudo
+# --preserve-env). That's the correct transport at the boundary and
+# avoids touching the launcher's env so the host shell is never
+# polluted.
+#
+# Levels:
+#   LOG_LEVEL=I   show everything (verbose; opt-in)
+#   LOG_LEVEL=W   show warnings + errors (default; quiet on success)
+#   LOG_LEVEL=E   show errors only
+#
+# $LOG_LEVEL is read on every call so the launcher can parse
+# --log-level after sourcing this file.
+
 # log <lvl> <stage> <event> <message>
 log() {
+  _t=2; case "${LOG_LEVEL:-W}" in I) _t=1 ;; E) _t=3 ;; esac
+  _m=1; case "$1"               in W) _m=2 ;; E) _m=3 ;; esac
+  [ "$_m" -lt "$_t" ] && return 0
   printf '%s %s %-16s %-14s %s\n' "$(_log_ts)" "$1" "$2" "$3" "$4" >&2
 }

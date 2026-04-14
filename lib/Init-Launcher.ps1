@@ -31,7 +31,9 @@ $wslSrc = { param($p) Invoke-Must wsl wslpath -a ($p.Replace('\', '/')) }
 
 $initLauncher = {
   Write-Log I launcher start "claude-code-sandbox $($MyInvocation.ScriptName)"
-  & "$projectRoot\lib\Ensure-Credential.ps1"
+  # Pass -LogLevel explicitly. Ensure-Credential.ps1 runs in its own
+  # script scope (invoked via &) and would otherwise default to W.
+  & "$projectRoot\lib\Ensure-Credential.ps1" -LogLevel $script:LogLevel
   . $initConfigDir
   . $detectArch
   . $buildToolArchives

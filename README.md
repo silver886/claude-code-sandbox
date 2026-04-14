@@ -63,7 +63,8 @@ All scripts accept:
 | `--claude-hash H` | `-ClaudeHash H` | Pin Tier-3 archive                                              |
 | `--force-pull`    | `-ForcePull`    | Ignore caches, re-download and rebuild                          |
 | `--image IMG`     | `-Image IMG`    | Override base OS image (default `fedora:latest`)                |
-| `--allow-dnf`    | `-AllowDnf`     | Grant `claude` passwordless `sudo dnf` inside the sandbox       |
+| `--allow-dnf`     | `-AllowDnf`     | Grant `claude` passwordless `sudo dnf` inside the sandbox       |
+| `--log-level LVL` | `-LogLevel LVL` | Logging threshold: `I` (verbose info), `W` (warn+error, default), `E` (error only). Default keeps successful launches quiet — pass `--log-level I` for full progress output. Inherited by every child process — sandbox setup, in-container claude, etc. |
 
 `podman-machine.sh` additionally takes `--cpus`, `--memory`, `--disk-size` and forwards them to `podman machine init`.
 
