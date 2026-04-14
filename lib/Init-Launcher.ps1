@@ -27,7 +27,17 @@ function Invoke-Must {
 . "$projectRoot\lib\Init-Config.ps1"
 . "$projectRoot\lib\Tools.ps1"
 
-$wslSrc = { param($p) Invoke-Must wsl wslpath -a ($p.Replace('\', '/')) }
+# Pure-PS equivalent of `wsl wslpath -a` for drive-letter paths.
+# `wsl wslpath` would spawn wsl.exe per call (~100–300 ms each on
+# Windows), and the launcher hits this in a tight loop while building
+# `-v` mount args. The translation rule for drvfs is deterministic:
+#   C:\foo\bar  →  /mnt/c/foo/bar
+# We only ever pass drive-letter paths (project root, $HOME-anchored
+# cache, baked-in script paths). UNC and \\wsl$ paths never appear.
+$wslSrc = { param($p)
+  $abs = [IO.Path]::GetFullPath($p)
+  '/mnt/' + $abs.Substring(0, 1).ToLower() + $abs.Substring(2).Replace('\', '/')
+}
 
 $initLauncher = {
   Write-Log I launcher start "claude-code-sandbox $($MyInvocation.ScriptName)"

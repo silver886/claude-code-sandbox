@@ -9,12 +9,21 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# Normalize to uppercase. [ValidateSet] accepts any case (PS
+# validation is case-insensitive), but we forward the literal
+# value as LOG_LEVEL=<x> into the container, and the sh-side
+# `case "${LOG_LEVEL}" in I) ... E) ...` is case-SENSITIVE. A
+# stray `-LogLevel i` would otherwise silently fall through to
+# the default W threshold and hide I-level logs from enable-dnf,
+# setup-system-mounts, claude-wrapper, etc.
+$LogLevel = $LogLevel.ToUpperInvariant()
+
 # Script-scoped LogLevel for Write-Log to read. No env var write,
 # no caller pollution — dies with the script.
 $script:LogLevel = $LogLevel
 
 $scriptDir = $PSScriptRoot
-$projectRoot = Split-Path $scriptDir
+$projectRoot = [IO.Path]::GetDirectoryName($scriptDir)
 . "$projectRoot\lib\Init-Launcher.ps1"
 . "$projectRoot\lib\Build-Image.ps1"
 

@@ -40,6 +40,28 @@ else
   _log_ts() { date -u +%Y-%m-%dT%H:%M:%S.000Z; }
 fi
 
+# ── ANSI color setup ──
+#
+# Each column gets its own hue so the eye can scan vertically:
+#   TS    gray    (90)        — visually recedes; you only read it
+#                               when correlating with another log
+#   LVL   bold per-level      — I cyan, W yellow, E red, all bold
+#                               so error rows pop in a wall of text
+#   STAGE green   (32)        — "where it happened"
+#   EVENT magenta (35)        — "what happened"
+#   MSG   default             — free-form, terminal default color
+#
+# Probed once at sourcing time. Disabled when:
+#   - $NO_COLOR is set (https://no-color.org/), or
+#   - stderr (fd 2) is not a tty (piped to a file / captured)
+# In the disabled case, the format degrades to the original
+# uncolored fixed-width layout — no escape bytes leak into logs.
+if [ -z "${NO_COLOR:-}" ] && [ -t 2 ]; then
+  _LOG_C=1
+else
+  _LOG_C=
+fi
+
 # Threshold filtering reads `$LOG_LEVEL` as a plain shell variable
 # (not an env var) — it lives in the launcher process and dies with
 # it. Child processes that need to inherit the level get LOG_LEVEL
@@ -70,5 +92,20 @@ log() {
   _t=2; case "${LOG_LEVEL:-W}" in I) _t=1 ;; E) _t=3 ;; esac
   _m=1; case "$1"               in W) _m=2 ;; E) _m=3 ;; esac
   [ "$_m" -lt "$_t" ] && return 0
-  printf '%s %s %-16s %-14s %s\n' "$(_log_ts)" "$1" "$2" "$3" "$4" >&2
+  if [ -n "$_LOG_C" ]; then
+    # Pre-build the colored level cell as a single %b arg so the
+    # rest of the format string can stay constant. %-16s/%-14s pad
+    # the *visible* text before the trailing reset escape, so column
+    # alignment is preserved while invisible escape bytes ride along
+    # outside the padding window.
+    case "$1" in
+      I) _lc='\033[1;36mI\033[0m' ;;
+      W) _lc='\033[1;33mW\033[0m' ;;
+      E) _lc='\033[1;31mE\033[0m' ;;
+    esac
+    printf '\033[90m%s\033[0m %b \033[32m%-16s\033[0m \033[35m%-14s\033[0m %s\n' \
+      "$(_log_ts)" "$_lc" "$2" "$3" "$4" >&2
+  else
+    printf '%s %s %-16s %-14s %s\n' "$(_log_ts)" "$1" "$2" "$3" "$4" >&2
+  fi
 }

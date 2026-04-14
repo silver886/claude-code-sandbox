@@ -11,14 +11,21 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # --log-level themselves.
 while [ $# -gt 0 ]; do
   case "$1" in
-    --log-level) LOG_LEVEL="$2"; shift 2 ;;
+    --log-level)
+      # Accept any case and normalize. Downstream consumers
+      # (log.sh itself) are case-SENSITIVE.
+      case "$2" in
+        I|i) LOG_LEVEL=I ;;
+        W|w) LOG_LEVEL=W ;;
+        E|e) LOG_LEVEL=E ;;
+        *) log E cred arg-parse "invalid --log-level: $2 (want I, W, or E)"; exit 1 ;;
+      esac
+      shift 2
+      ;;
     *) log E cred arg-parse "unknown option: $1"; exit 1 ;;
   esac
 done
-case "${LOG_LEVEL:-W}" in
-  I|W|E) ;;
-  *) log E cred arg-parse "invalid --log-level: $LOG_LEVEL (want I, W, or E)"; exit 1 ;;
-esac
+: "${LOG_LEVEL:=W}"
 
 CRED_PATH="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
 

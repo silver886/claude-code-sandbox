@@ -16,9 +16,11 @@ $imageSrc = {
     "$projectRoot\bin\setup-tools.sh",
     "$projectRoot\config\sudoers-claude-enable-dnf"
   )
-  -join ($files | ForEach-Object {
-    & $sha256 ([IO.File]::ReadAllText($_).Replace("`r`n", "`n"))
-  })
+  $sb = [Text.StringBuilder]::new(256)
+  foreach ($f in $files) {
+    [void]$sb.Append((& $sha256 ([IO.File]::ReadAllText($f).Replace("`r`n", "`n"))))
+  }
+  $sb.ToString()
 }
 
 $buildBaseImage = {

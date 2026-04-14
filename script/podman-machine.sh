@@ -26,14 +26,21 @@ while [ $# -gt 0 ]; do
     --memory)      MACHINE_MEMORY="$2"; shift 2 ;;
     --disk-size)   MACHINE_DISK_SIZE="$2"; shift 2 ;;
     --allow-dnf)   ALLOW_DNF=1; shift ;;
-    --log-level)   LOG_LEVEL="$2"; shift 2 ;;
+    --log-level)
+      # Accept any case and normalize. Downstream consumers
+      # (log.sh, inline loggers in bin/*.sh) are case-SENSITIVE.
+      case "$2" in
+        I|i) LOG_LEVEL=I ;;
+        W|w) LOG_LEVEL=W ;;
+        E|e) LOG_LEVEL=E ;;
+        *) log E launcher arg-parse "invalid --log-level: $2 (want I, W, or E)"; exit 1 ;;
+      esac
+      shift 2
+      ;;
     *) log E launcher arg-parse "unknown option: $1"; exit 1 ;;
   esac
 done
-case "${LOG_LEVEL:-W}" in
-  I|W|E) ;;
-  *) log E launcher arg-parse "invalid --log-level: $LOG_LEVEL (want I, W, or E)"; exit 1 ;;
-esac
+: "${LOG_LEVEL:=W}"
 MACHINE_ARGS=""
 [ -n "$MACHINE_CPUS" ]      && MACHINE_ARGS="$MACHINE_ARGS --cpus $MACHINE_CPUS"
 [ -n "$MACHINE_MEMORY" ]    && MACHINE_ARGS="$MACHINE_ARGS --memory $MACHINE_MEMORY"

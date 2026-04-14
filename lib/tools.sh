@@ -118,6 +118,136 @@ _archive_ok() {
   [ -f "$1" ] && [ -s "$1" ] && tar -tJf "$1" >/dev/null 2>&1
 }
 
+# ── Per-tier builders ──
+#
+# Each _build_*_tier function is self-contained and operates on its
+# own archive path. The orchestrator computes BASE_ARCHIVE /
+# TOOL_ARCHIVE / CLAUDE_ARCHIVE up front so that the 3 tier workers
+# can run in parallel without sharing any mutable state — each just
+# reads its archive path, downloads, and writes the file in place.
+#
+# Background subshells inherit the parent's env vars at fork time,
+# so OPT_*_HASH / FORCE_PULL / *_VER / ARCH_* / *_ARCHIVE are all
+# visible inside the worker. Variables set inside a worker do NOT
+# propagate back, but they don't need to — the only side effect is
+# the archive file on disk.
+#
+# `log` writes to stderr via `printf`, which is line-atomic for
+# small writes on POSIX. Output from the 3 workers may interleave
+# at line boundaries but never within a line.
+
+_build_base_tier() {
+  if [ -n "${OPT_BASE_HASH:-}" ]; then
+    if ! _archive_ok "$BASE_ARCHIVE"; then
+      log E tools.base fail "pinned archive is corrupt: $(basename "$BASE_ARCHIVE")"
+      return 1
+    fi
+    log I tools.base cache-pin "$(basename "$BASE_ARCHIVE")"
+    return 0
+  fi
+  if [ -z "${FORCE_PULL:-}" ] && _archive_ok "$BASE_ARCHIVE"; then
+    log I tools.base cache-hit "$(basename "$BASE_ARCHIVE")"
+    return 0
+  fi
+  if [ -f "$BASE_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+    log W tools.base rebuild "cached archive corrupt; rebuilding"
+    rm -f "$BASE_ARCHIVE"
+  fi
+  log I tools.base downloading "node $NODE_VER, ripgrep $RG_VER, micro $MICRO_VER"
+  _DIR=$(mktemp -d)
+
+  (curl -fsSL "https://nodejs.org/dist/v${NODE_VER}/node-v${NODE_VER}-linux-${ARCH_NODE}.tar.xz" \
+    | tar -xJ --strip-components=2 -C "$_DIR" "node-v${NODE_VER}-linux-${ARCH_NODE}/bin/node") &
+  _PID1=$!
+  (curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VER}/ripgrep-${RG_VER}-${ARCH_RG}.tar.gz" \
+    | tar -xz --strip-components=1 -C "$_DIR" "ripgrep-${RG_VER}-${ARCH_RG}/rg") &
+  _PID2=$!
+  (curl -fsSL "https://github.com/zyedidia/micro/releases/download/v${MICRO_VER}/micro-${MICRO_VER}-${ARCH_MICRO}.tar.gz" \
+    | tar -xz --strip-components=1 -C "$_DIR" "micro-${MICRO_VER}/micro") &
+  _PID3=$!
+  wait_all "$_PID1" "$_PID2" "$_PID3"
+
+  cp "$PROJECT_ROOT/bin/claude-wrapper.sh" "$_DIR/claude-wrapper"
+  chmod +x "$_DIR/node" "$_DIR/rg" "$_DIR/micro" "$_DIR/claude-wrapper"
+  log I tools.base packing "$(basename "$BASE_ARCHIVE")"
+  # Build to a temp path and atomic-rename on success. If the
+  # process is killed mid-tar, the partial file sits at the .partial
+  # path and gets swept on the next run; the final BASE_ARCHIVE
+  # path is never partially written.
+  _BASE_TMP="$BASE_ARCHIVE.partial.$$"
+  tar -C "$_DIR" -cJf "$_BASE_TMP" node rg micro claude-wrapper
+  mv -f "$_BASE_TMP" "$BASE_ARCHIVE"
+  rm -rf "$_DIR"
+  log I tools.base cached "$(basename "$BASE_ARCHIVE")"
+}
+
+_build_tool_tier() {
+  if [ -n "${OPT_TOOL_HASH:-}" ]; then
+    if ! _archive_ok "$TOOL_ARCHIVE"; then
+      log E tools.tool fail "pinned archive is corrupt: $(basename "$TOOL_ARCHIVE")"
+      return 1
+    fi
+    log I tools.tool cache-pin "$(basename "$TOOL_ARCHIVE")"
+    return 0
+  fi
+  if [ -z "${FORCE_PULL:-}" ] && _archive_ok "$TOOL_ARCHIVE"; then
+    log I tools.tool cache-hit "$(basename "$TOOL_ARCHIVE")"
+    return 0
+  fi
+  if [ -f "$TOOL_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+    log W tools.tool rebuild "cached archive corrupt; rebuilding"
+    rm -f "$TOOL_ARCHIVE"
+  fi
+  log I tools.tool downloading "pnpm $PNPM_VER, uv $UV_VER"
+  _DIR=$(mktemp -d)
+
+  (curl -fsSL "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VER}/pnpm-${ARCH_PNPM}" \
+    -o "$_DIR/pnpm") &
+  _PID1=$!
+  (curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VER}/uv-${ARCH_UV}.tar.gz" \
+    | tar -xz --strip-components=1 -C "$_DIR") &
+  _PID2=$!
+  wait_all "$_PID1" "$_PID2"
+
+  chmod +x "$_DIR/pnpm" "$_DIR/uv" "$_DIR/uvx"
+  log I tools.tool packing "$(basename "$TOOL_ARCHIVE")"
+  _TOOL_TMP="$TOOL_ARCHIVE.partial.$$"
+  tar -C "$_DIR" -cJf "$_TOOL_TMP" pnpm uv uvx
+  mv -f "$_TOOL_TMP" "$TOOL_ARCHIVE"
+  rm -rf "$_DIR"
+  log I tools.tool cached "$(basename "$TOOL_ARCHIVE")"
+}
+
+_build_claude_tier() {
+  if [ -n "${OPT_CLAUDE_HASH:-}" ]; then
+    if ! _archive_ok "$CLAUDE_ARCHIVE"; then
+      log E tools.claude fail "pinned archive is corrupt: $(basename "$CLAUDE_ARCHIVE")"
+      return 1
+    fi
+    log I tools.claude cache-pin "$(basename "$CLAUDE_ARCHIVE")"
+    return 0
+  fi
+  if [ -z "${FORCE_PULL:-}" ] && _archive_ok "$CLAUDE_ARCHIVE"; then
+    log I tools.claude cache-hit "$(basename "$CLAUDE_ARCHIVE")"
+    return 0
+  fi
+  if [ -f "$CLAUDE_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
+    log W tools.claude rebuild "cached archive corrupt; rebuilding"
+    rm -f "$CLAUDE_ARCHIVE"
+  fi
+  log I tools.claude downloading "claude $CLAUDE_VER"
+  _GCS="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
+  _DIR=$(mktemp -d)
+  curl -fsSL "$_GCS/$CLAUDE_VER/$ARCH_CLAUDE/claude" -o "$_DIR/claude"
+  chmod +x "$_DIR/claude"
+  log I tools.claude packing "$(basename "$CLAUDE_ARCHIVE")"
+  _CLAUDE_TMP="$CLAUDE_ARCHIVE.partial.$$"
+  tar -C "$_DIR" -cJf "$_CLAUDE_TMP" claude
+  mv -f "$_CLAUDE_TMP" "$CLAUDE_ARCHIVE"
+  rm -rf "$_DIR"
+  log I tools.claude cached "$(basename "$CLAUDE_ARCHIVE")"
+}
+
 # Build 3-tier tool archives. Respects OPT_BASE_HASH, OPT_TOOL_HASH,
 # OPT_CLAUDE_HASH (pin to cached) and FORCE_PULL (skip cache).
 # Sets: BASE_ARCHIVE, TOOL_ARCHIVE, CLAUDE_ARCHIVE
@@ -129,124 +259,43 @@ build_tool_archives() {
   # temp file leaks on Ctrl-C and needs collecting).
   rm -f "$TOOLS_DIR"/*.partial.* 2>/dev/null || true
 
-  # ── Tier 1: Base (node + rg + micro + claude-wrapper) ──
+  # Fetch versions once up front if any tier is unpinned.
+  # fetch_tool_versions does all 6 HTTP calls in parallel internally.
+  if [ -z "${OPT_BASE_HASH:-}" ] || [ -z "${OPT_TOOL_HASH:-}" ] || [ -z "${OPT_CLAUDE_HASH:-}" ]; then
+    [ -z "${NODE_VER:-}" ] && fetch_tool_versions
+  fi
+
+  # Resolve all 3 archive paths up front so the parallel workers are
+  # fully independent — each just operates on the path it was given.
   if [ -n "${OPT_BASE_HASH:-}" ]; then
     BASE_ARCHIVE=$(resolve_archive "base" "$OPT_BASE_HASH")
-    if ! _archive_ok "$BASE_ARCHIVE"; then
-      log E tools.base fail "pinned archive is corrupt: $(basename "$BASE_ARCHIVE")"
-      exit 1
-    fi
-    log I tools.base cache-pin "$(basename "$BASE_ARCHIVE")"
   else
-    [ -z "${NODE_VER:-}" ] && fetch_tool_versions
     BASE_HASH=$(sha256 "base-node:$NODE_VER-rg:$RG_VER-micro:$MICRO_VER-$(cat "$PROJECT_ROOT/bin/claude-wrapper.sh")")
     BASE_ARCHIVE="$TOOLS_DIR/base-$BASE_HASH.tar.xz"
-    if [ -z "${FORCE_PULL:-}" ] && _archive_ok "$BASE_ARCHIVE"; then
-      log I tools.base cache-hit "$(basename "$BASE_ARCHIVE")"
-    else
-      if [ -f "$BASE_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
-        log W tools.base rebuild "cached archive corrupt; rebuilding"
-        rm -f "$BASE_ARCHIVE"
-      fi
-      log I tools.base downloading "node $NODE_VER, ripgrep $RG_VER, micro $MICRO_VER"
-      _DIR=$(mktemp -d)
-
-      (curl -fsSL "https://nodejs.org/dist/v${NODE_VER}/node-v${NODE_VER}-linux-${ARCH_NODE}.tar.xz" \
-        | tar -xJ --strip-components=2 -C "$_DIR" "node-v${NODE_VER}-linux-${ARCH_NODE}/bin/node") &
-      _PID1=$!
-      (curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VER}/ripgrep-${RG_VER}-${ARCH_RG}.tar.gz" \
-        | tar -xz --strip-components=1 -C "$_DIR" "ripgrep-${RG_VER}-${ARCH_RG}/rg") &
-      _PID2=$!
-      (curl -fsSL "https://github.com/zyedidia/micro/releases/download/v${MICRO_VER}/micro-${MICRO_VER}-${ARCH_MICRO}.tar.gz" \
-        | tar -xz --strip-components=1 -C "$_DIR" "micro-${MICRO_VER}/micro") &
-      _PID3=$!
-      wait_all "$_PID1" "$_PID2" "$_PID3"
-
-      cp "$PROJECT_ROOT/bin/claude-wrapper.sh" "$_DIR/claude-wrapper"
-      chmod +x "$_DIR/node" "$_DIR/rg" "$_DIR/micro" "$_DIR/claude-wrapper"
-      log I tools.base packing "$(basename "$BASE_ARCHIVE")"
-      # Build to a temp path and atomic-rename on success. If the
-      # process is killed mid-tar, the partial file sits at the .partial
-      # path and gets swept on the next run; the final BASE_ARCHIVE
-      # path is never partially written.
-      _BASE_TMP="$BASE_ARCHIVE.partial.$$"
-      tar -C "$_DIR" -cJf "$_BASE_TMP" node rg micro claude-wrapper
-      mv -f "$_BASE_TMP" "$BASE_ARCHIVE"
-      rm -rf "$_DIR"
-      log I tools.base cached "$(basename "$BASE_ARCHIVE")"
-    fi
   fi
-
-  # ── Tier 2: Tool (pnpm + uv + uvx) ──
   if [ -n "${OPT_TOOL_HASH:-}" ]; then
     TOOL_ARCHIVE=$(resolve_archive "tool" "$OPT_TOOL_HASH")
-    if ! _archive_ok "$TOOL_ARCHIVE"; then
-      log E tools.tool fail "pinned archive is corrupt: $(basename "$TOOL_ARCHIVE")"
-      exit 1
-    fi
-    log I tools.tool cache-pin "$(basename "$TOOL_ARCHIVE")"
   else
-    [ -z "${PNPM_VER:-}" ] && fetch_tool_versions
     TOOL_HASH=$(sha256 "tool-pnpm:$PNPM_VER-uv:$UV_VER")
     TOOL_ARCHIVE="$TOOLS_DIR/tool-$TOOL_HASH.tar.xz"
-    if [ -z "${FORCE_PULL:-}" ] && _archive_ok "$TOOL_ARCHIVE"; then
-      log I tools.tool cache-hit "$(basename "$TOOL_ARCHIVE")"
-    else
-      if [ -f "$TOOL_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
-        log W tools.tool rebuild "cached archive corrupt; rebuilding"
-        rm -f "$TOOL_ARCHIVE"
-      fi
-      log I tools.tool downloading "pnpm $PNPM_VER, uv $UV_VER"
-      _DIR=$(mktemp -d)
-
-      (curl -fsSL "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VER}/pnpm-${ARCH_PNPM}" \
-        -o "$_DIR/pnpm") &
-      _PID1=$!
-      (curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VER}/uv-${ARCH_UV}.tar.gz" \
-        | tar -xz --strip-components=1 -C "$_DIR") &
-      _PID2=$!
-      wait_all "$_PID1" "$_PID2"
-
-      chmod +x "$_DIR/pnpm" "$_DIR/uv" "$_DIR/uvx"
-      log I tools.tool packing "$(basename "$TOOL_ARCHIVE")"
-      _TOOL_TMP="$TOOL_ARCHIVE.partial.$$"
-      tar -C "$_DIR" -cJf "$_TOOL_TMP" pnpm uv uvx
-      mv -f "$_TOOL_TMP" "$TOOL_ARCHIVE"
-      rm -rf "$_DIR"
-      log I tools.tool cached "$(basename "$TOOL_ARCHIVE")"
-    fi
   fi
-
-  # ── Tier 3: Claude Code ──
   if [ -n "${OPT_CLAUDE_HASH:-}" ]; then
     CLAUDE_ARCHIVE=$(resolve_archive "claude" "$OPT_CLAUDE_HASH")
-    if ! _archive_ok "$CLAUDE_ARCHIVE"; then
-      log E tools.claude fail "pinned archive is corrupt: $(basename "$CLAUDE_ARCHIVE")"
-      exit 1
-    fi
-    log I tools.claude cache-pin "$(basename "$CLAUDE_ARCHIVE")"
   else
-    [ -z "${CLAUDE_VER:-}" ] && fetch_tool_versions
     CLAUDE_HASH=$(sha256 "claude-$CLAUDE_VER")
     CLAUDE_ARCHIVE="$TOOLS_DIR/claude-$CLAUDE_HASH.tar.xz"
-    if [ -z "${FORCE_PULL:-}" ] && _archive_ok "$CLAUDE_ARCHIVE"; then
-      log I tools.claude cache-hit "$(basename "$CLAUDE_ARCHIVE")"
-    else
-      if [ -f "$CLAUDE_ARCHIVE" ] && [ -z "${FORCE_PULL:-}" ]; then
-        log W tools.claude rebuild "cached archive corrupt; rebuilding"
-        rm -f "$CLAUDE_ARCHIVE"
-      fi
-      log I tools.claude downloading "claude $CLAUDE_VER"
-      GCS_BUCKET="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
-      _DIR=$(mktemp -d)
-      curl -fsSL "$GCS_BUCKET/$CLAUDE_VER/$ARCH_CLAUDE/claude" -o "$_DIR/claude"
-      chmod +x "$_DIR/claude"
-      log I tools.claude packing "$(basename "$CLAUDE_ARCHIVE")"
-      _CLAUDE_TMP="$CLAUDE_ARCHIVE.partial.$$"
-      tar -C "$_DIR" -cJf "$_CLAUDE_TMP" claude
-      mv -f "$_CLAUDE_TMP" "$CLAUDE_ARCHIVE"
-      rm -rf "$_DIR"
-      log I tools.claude cached "$(basename "$CLAUDE_ARCHIVE")"
-    fi
   fi
+
+  # Fan out: 3 background subshells, one per tier. Tiers are fully
+  # independent — different downloads, different archive paths, no
+  # shared writable state — so the cold-cache wall time drops from
+  # sum(tiers) to max(tiers). On warm cache, the 3 `tar -tJf`
+  # validations also run concurrently.
+  _build_base_tier &
+  _BPID=$!
+  _build_tool_tier &
+  _TPID=$!
+  _build_claude_tier &
+  _CPID=$!
+  wait_all "$_BPID" "$_TPID" "$_CPID"
 }

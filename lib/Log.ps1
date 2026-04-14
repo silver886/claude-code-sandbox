@@ -34,6 +34,46 @@
 #   W   show warnings + errors (default; quiet on success)
 #   E   show errors only
 
+# ── ANSI color setup ──
+#
+# Match lib/log.sh exactly so launchers look identical regardless of
+# which side they run on. Each column gets its own hue so the eye
+# can scan vertically:
+#   TS    gray    (90)        — recedes; only read when correlating
+#   LVL   bold per-level      — I cyan, W yellow, E red, all bold so
+#                               error rows pop in a wall of text
+#   STAGE green   (32)        — "where it happened"
+#   EVENT magenta (35)        — "what happened"
+#   MSG   default             — terminal default color
+#
+# Probed once at module load. Disabled when:
+#   - $env:NO_COLOR is set (https://no-color.org/), or
+#   - stderr is redirected to a file/pipe (not a console)
+# In the disabled case the format degrades to the original uncolored
+# fixed-width layout — no escape bytes leak into captured output.
+if (-not $env:NO_COLOR -and -not [Console]::IsErrorRedirected) {
+  $script:LogColor = @{
+    Reset = "`e[0m"
+    TS    = "`e[90m"
+    Stage = "`e[32m"
+    Event = "`e[35m"
+    I     = "`e[1;36m"
+    W     = "`e[1;33m"
+    E     = "`e[1;31m"
+  }
+}
+else {
+  $script:LogColor = @{
+    Reset = ''
+    TS    = ''
+    Stage = ''
+    Event = ''
+    I     = ''
+    W     = ''
+    E     = ''
+  }
+}
+
 function Write-Log {
   param(
     [Parameter(Mandatory)][ValidateSet('I', 'W', 'E')][string]$Level,
@@ -45,11 +85,19 @@ function Write-Log {
   $msgLevel = switch ($Level) { 'W' { 2 } 'E' { 3 } default { 1 } }
   if ($msgLevel -lt $threshold) { return }
   $ts = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
-  $line = '{0} {1} {2,-16} {3,-14} {4}' -f $ts, $Level, $Stage, $Event, $Msg
-  $color = switch ($Level) {
-    'W' { 'Yellow' }
-    'E' { 'Red' }
-    default { 'DarkGray' }
-  }
-  Write-Host $line -ForegroundColor $color
+  $c = $script:LogColor
+  # The {-N} format specifiers pad the *visible* Stage/Event text to
+  # 16/14 chars BEFORE the trailing reset escape, so column alignment
+  # is preserved while invisible escape bytes ride along outside the
+  # padding window. Same trick used in lib/log.sh.
+  $line = '{0}{1}{2} {3}{4}{2} {5}{6,-16}{2} {7}{8,-14}{2} {9}' -f `
+    $c.TS, $ts, $c.Reset, $c[$Level], $Level, $c.Stage, $Stage, $c.Event, $Event, $Msg
+  # Use [Console]::Error directly rather than Write-Host so that logs
+  # emitted from a Start-ThreadJob runspace stream live to the
+  # parent's terminal. Write-Host writes to the Information stream,
+  # which ThreadJob captures and only releases on Receive-Job — that
+  # would defer all tier-build logs until after parallel completion.
+  # [Console]::Error.WriteLine is a single write(2)/WriteFile, atomic
+  # at the line boundary across threads in the same process.
+  [Console]::Error.WriteLine($line)
 }

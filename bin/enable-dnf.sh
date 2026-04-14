@@ -3,16 +3,28 @@
 # Runs inside the sandbox as root; called by claude-wrapper.sh.
 set -eu
 
-# Inline structured logger — same format and threshold semantics as
-# lib/log.sh. LOG_LEVEL is passed in as a --log-level arg by the
-# caller (claude-wrapper.sh) because Fedora sudoers env_check
-# blocks unknown env vars even with --preserve-env=.
+# Inline structured logger — same format, threshold, and color
+# semantics as lib/log.sh. LOG_LEVEL is passed in as a --log-level
+# arg by the caller (claude-wrapper.sh) because Fedora sudoers
+# env_check blocks unknown env vars even with --preserve-env=.
+# Colors disabled when $NO_COLOR is set or stderr is not a tty.
+if [ -z "${NO_COLOR:-}" ] && [ -t 2 ]; then _LOG_C=1; else _LOG_C=; fi
 log() {
   _t=2; case "${LOG_LEVEL:-W}" in I) _t=1 ;; E) _t=3 ;; esac
   _m=1; case "$1"               in W) _m=2 ;; E) _m=3 ;; esac
   [ "$_m" -lt "$_t" ] && return 0
-  printf '%s %s %-16s %-14s %s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$1" "$2" "$3" "$4" >&2
+  if [ -n "$_LOG_C" ]; then
+    case "$1" in
+      I) _lc='\033[1;36mI\033[0m' ;;
+      W) _lc='\033[1;33mW\033[0m' ;;
+      E) _lc='\033[1;31mE\033[0m' ;;
+    esac
+    printf '\033[90m%s\033[0m %b \033[32m%-16s\033[0m \033[35m%-14s\033[0m %s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$_lc" "$2" "$3" "$4" >&2
+  else
+    printf '%s %s %-16s %-14s %s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$1" "$2" "$3" "$4" >&2
+  fi
 }
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -26,7 +38,16 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --yes)       ENABLE=1; shift ;;
     --purge)     PURGE=1; shift ;;
-    --log-level) LOG_LEVEL="$2"; shift 2 ;;
+    --log-level)
+      # Accept any case — log.sh's threshold case is case-SENSITIVE.
+      case "$2" in
+        I|i) LOG_LEVEL=I ;;
+        W|w) LOG_LEVEL=W ;;
+        E|e) LOG_LEVEL=E ;;
+        *) log E dnf arg-parse "invalid --log-level: $2 (want I, W, or E)"; exit 1 ;;
+      esac
+      shift 2
+      ;;
     *) log E dnf arg-parse "unknown option: $1"; exit 1 ;;
   esac
 done

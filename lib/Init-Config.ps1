@@ -19,13 +19,13 @@
 
 $stageRoFile = { param($src, $dest)
   $realInfo = [IO.File]::ResolveLinkTarget($src, $true)
-  $real = if ($realInfo) { $realInfo.FullName } else { (Resolve-Path $src).Path }
-  Copy-Item -LiteralPath $real -Destination $dest -Force
+  $real = if ($realInfo) { $realInfo.FullName } else { [IO.Path]::GetFullPath($src) }
+  [IO.File]::Copy($real, $dest, $true)
 }
 
 $stageRwFile = { param($src, $dest)
   $realInfo = [IO.File]::ResolveLinkTarget($src, $true)
-  $real = if ($realInfo) { $realInfo.FullName } else { (Resolve-Path $src).Path }
+  $real = if ($realInfo) { $realInfo.FullName } else { [IO.Path]::GetFullPath($src) }
   if ([IO.File]::Exists($dest)) { [IO.File]::Delete($dest) }
   try {
     New-Item -ItemType HardLink -Path $dest -Target $real -ErrorAction Stop > $null
@@ -80,7 +80,7 @@ $initConfigDir = {
   # Wipe + re-create ro/ so upstream deletions propagate and any
   # in-session tampering on copies is undone.
   if ([IO.Directory]::Exists($stageRo)) {
-    Remove-Item -LiteralPath $stageRo -Recurse -Force
+    [IO.Directory]::Delete($stageRo, $true)
   }
   [IO.Directory]::CreateDirectory($stageRo) > $null
 

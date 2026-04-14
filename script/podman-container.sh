@@ -22,14 +22,21 @@ while [ $# -gt 0 ]; do
     --force-pull)  FORCE_PULL=1; shift ;;
     --image)       BASE_IMAGE="$2"; shift 2 ;;
     --allow-dnf)   ALLOW_DNF=1; shift ;;
-    --log-level)   LOG_LEVEL="$2"; shift 2 ;;
+    --log-level)
+      # Accept any case and normalize. Downstream consumers
+      # (log.sh, inline loggers in bin/*.sh) are case-SENSITIVE.
+      case "$2" in
+        I|i) LOG_LEVEL=I ;;
+        W|w) LOG_LEVEL=W ;;
+        E|e) LOG_LEVEL=E ;;
+        *) log E launcher arg-parse "invalid --log-level: $2 (want I, W, or E)"; exit 1 ;;
+      esac
+      shift 2
+      ;;
     *) log E launcher arg-parse "unknown option: $1"; exit 1 ;;
   esac
 done
-case "${LOG_LEVEL:-W}" in
-  I|W|E) ;;
-  *) log E launcher arg-parse "invalid --log-level: $LOG_LEVEL (want I, W, or E)"; exit 1 ;;
-esac
+: "${LOG_LEVEL:=W}"
 
 # SELinux detection: prefer `getenforce` (policycoreutils), fall back
 # to reading /sys/fs/selinux/enforce so we still apply label=disable on

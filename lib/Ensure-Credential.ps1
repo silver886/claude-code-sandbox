@@ -6,12 +6,18 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# Normalize to uppercase. [ValidateSet] accepts any case (PS
+# validation is case-insensitive) but downstream sh consumers
+# are case-sensitive. See script/podman-container.ps1 for the
+# full rationale.
+$LogLevel = $LogLevel.ToUpperInvariant()
+
 # Script-scoped LogLevel for Write-Log to read. No env var write,
 # no caller pollution — dies with this script.
 $script:LogLevel = $LogLevel
 
 $scriptDir = $PSScriptRoot
-$projectRoot = Split-Path $scriptDir
+$projectRoot = [IO.Path]::GetDirectoryName($scriptDir)
 . "$projectRoot\lib\Log.ps1"
 
 $configDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { [IO.Path]::Combine($HOME, '.claude') }
