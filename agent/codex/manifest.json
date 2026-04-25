@@ -1,0 +1,25 @@
+{
+  "name": "codex",
+  "binary": "codex",
+  "projectDir": ".codex",
+  "configDir": {
+    "env": "CODEX_HOME",
+    "default": "$HOME/.codex"
+  },
+  "files": {
+    "rw":     ["auth.json", "config.toml"],
+    "ro":     ["AGENTS.md", "AGENTS.override.md"],
+    "roDirs": ["rules"]
+  },
+  "credential": { "strategy": "oauth-openai" },
+  "executable": {
+    "type":           "platform-binary",
+    "versionPackage": "@openai/codex",
+    "tarballUrl":     "https://registry.npmjs.org/@openai/codex/-/codex-{version}-linux-{arch}.tgz",
+    "binPath":        "package/vendor/{triple}/codex/codex"
+  },
+  "launch": {
+    "flags": ["--dangerously-bypass-approvals-and-sandbox"],
+    "env": {}
+  }
+}

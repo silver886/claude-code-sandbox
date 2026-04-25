@@ -1,5 +1,5 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -8,23 +8,23 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # available for option-parse errors and stage markers below.
 . "$PROJECT_ROOT/lib/init-launcher.sh"
 
+AGENT="claude"
 OPT_BASE_HASH=""
 OPT_TOOL_HASH=""
-OPT_CLAUDE_HASH=""
+OPT_AGENT_HASH=""
 FORCE_PULL=""
 BASE_IMAGE="fedora:latest"
 ALLOW_DNF=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --base-hash)   OPT_BASE_HASH="$2"; shift 2 ;;
-    --tool-hash)   OPT_TOOL_HASH="$2"; shift 2 ;;
-    --claude-hash) OPT_CLAUDE_HASH="$2"; shift 2 ;;
-    --force-pull)  FORCE_PULL=1; shift ;;
-    --image)       BASE_IMAGE="$2"; shift 2 ;;
-    --allow-dnf)   ALLOW_DNF=1; shift ;;
+    --agent)      AGENT="$2"; shift 2 ;;
+    --base-hash)  OPT_BASE_HASH="$2"; shift 2 ;;
+    --tool-hash)  OPT_TOOL_HASH="$2"; shift 2 ;;
+    --agent-hash) OPT_AGENT_HASH="$2"; shift 2 ;;
+    --force-pull) FORCE_PULL=1; shift ;;
+    --image)      BASE_IMAGE="$2"; shift 2 ;;
+    --allow-dnf)  ALLOW_DNF=1; shift ;;
     --log-level)
-      # Accept any case and normalize. Downstream consumers
-      # (log.sh, inline loggers in bin/*.sh) are case-SENSITIVE.
       case "$2" in
         I|i) LOG_LEVEL=I ;;
         W|w) LOG_LEVEL=W ;;
@@ -38,9 +38,7 @@ while [ $# -gt 0 ]; do
 done
 : "${LOG_LEVEL:=W}"
 
-# SELinux detection: prefer `getenforce` (policycoreutils), fall back
-# to reading /sys/fs/selinux/enforce so we still apply label=disable on
-# hosts where the tool isn't installed but the LSM is active.
+# SELinux detection
 SELINUX_OPT=""
 _SELINUX_STATE=""
 if command -v getenforce >/dev/null 2>&1; then
@@ -60,13 +58,11 @@ init_launcher
 
 # ── Build base image ──
 
-# Hash each input file independently and concatenate the digests so
-# file-boundary content can't collide when the contents are shifted.
 _IMG_HASHES=""
-for _f in Containerfile bin/enable-dnf.sh bin/setup-tools.sh config/sudoers-claude-enable-dnf; do
-  _IMG_HASHES="$_IMG_HASHES$(sha256 "$(cat "$PROJECT_ROOT/$_f")")"
+for _f in Containerfile lib/log.sh bin/enable-dnf.sh bin/setup-tools.sh config/sudoers-enable-dnf.tmpl; do
+  _IMG_HASHES="$_IMG_HASHES$(sha256_file "$PROJECT_ROOT/$_f")"
 done
-IMAGE_TAG="claude-base-$(sha256 "$_IMG_HASHES-$BASE_IMAGE")"
+IMAGE_TAG="sandbox-base-$(sha256 "$_IMG_HASHES-$BASE_IMAGE")"
 if podman image exists "$IMAGE_TAG" 2>/dev/null && [ -z "${FORCE_PULL:-}" ]; then
   log I image cache-hit "$IMAGE_TAG"
 else
@@ -79,48 +75,35 @@ fi
 
 # ── Run ──
 #
-# System config assembly via podman -v stacking (no in-container privileges):
-#   1. cr/ as the base of /etc/claude-code-sandbox (rw, persists per project)
-#   2. rw/<f> per-file mounts shadow cr at <f> with the host hardlinks
-#      (mount-point gives EBUSY → in-place writeFileSync → host sync)
-#   3. ro/<x>:ro per-file/per-subdir mounts shadow cr at <x>, read-only
-#   4. .mask/ bind-mounted (read-only) over /var/workdir/.claude/.system
-#      to mask system scope from project scope. Bind-of-empty-dir
-#      instead of --tmpfs because podman --tmpfs nested under another
-#      -v has been observed to silently no-op.
+# System config assembly via podman -v stacking:
+#   1. cr/ as the base of $AGENT_SANDBOX_DIR (rw, persists per project)
+#   2. rw/<f> per-file mounts (EBUSY → in-place writeFileSync → host sync)
+#   3. ro/<x>:ro per-file/per-subdir (read-only)
+#   4. .mask/ bind (read-only) over /var/workdir/<projectDir>/.system
+#      to mask system scope from project scope
 
-# Build the cfg-mount args as positional parameters so paths with
-# spaces survive (POSIX sh has no real arrays — `set --` is the
-# closest thing). Each `-v` flag is two positional args; `"$@"`
-# expands them properly quoted into the podman run call.
-set -- -v "$SYSTEM_DIR/cr:/etc/claude-code-sandbox"
-for _f in $CONFIG_FILES; do
-  set -- "$@" -v "$SYSTEM_DIR/rw/$_f:/etc/claude-code-sandbox/$_f"
+set -- -v "$SYSTEM_DIR/cr:$AGENT_SANDBOX_DIR"
+for _f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
+  set -- "$@" -v "$SYSTEM_DIR/rw/$_f:$AGENT_SANDBOX_DIR/$_f"
 done
-for _f in $RO_FILES; do
-  set -- "$@" -v "$SYSTEM_DIR/ro/$_f:/etc/claude-code-sandbox/$_f:ro"
+for _f in ${RO_FILES[@]+"${RO_FILES[@]}"}; do
+  set -- "$@" -v "$SYSTEM_DIR/ro/$_f:$AGENT_SANDBOX_DIR/$_f:ro"
 done
-for _d in $RO_DIRS; do
-  set -- "$@" -v "$SYSTEM_DIR/ro/$_d:/etc/claude-code-sandbox/$_d:ro"
+for _d in ${RO_DIRS[@]+"${RO_DIRS[@]}"}; do
+  set -- "$@" -v "$SYSTEM_DIR/ro/$_d:$AGENT_SANDBOX_DIR/$_d:ro"
 done
 
-log I run launch "podman container run $IMAGE_TAG"
-# --log-level is appended after the image tag as CMD args. The
-# Containerfile ENTRYPOINT is setup-tools.sh, which parses the flag
-# from its tail args and forwards it to claude-wrapper.sh (the
-# renamed `claude`). No LOG_LEVEL env var crosses the container
-# boundary — every hop passes the level as an explicit arg.
+log I run launch "podman container run $IMAGE_TAG ($AGENT)"
 podman container run --interactive --tty --rm \
-  --userns=keep-id:uid=1000,gid=1000 \
+  --userns=keep-id:uid=24368,gid=24368 \
   $SELINUX_OPT \
   -v "$BASE_ARCHIVE:/tmp/base.tar.xz:ro" \
   -v "$TOOL_ARCHIVE:/tmp/tool.tar.xz:ro" \
-  -v "$CLAUDE_ARCHIVE:/tmp/claude.tar.xz:ro" \
+  -v "$AGENT_ARCHIVE:/tmp/agent.tar.xz:ro" \
   -v "$PWD:/var/workdir" \
   "$@" \
-  -v "$SYSTEM_DIR/.mask:/var/workdir/.claude/.system:ro" \
+  -v "$SYSTEM_DIR/.mask:/var/workdir/$AGENT_PROJECT_DIR/.system:ro" \
   --workdir /var/workdir \
-  --env CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox \
-  ${ALLOW_DNF:+--env CLAUDE_ENABLE_DNF=1} \
+  ${ALLOW_DNF:+--env SANDBOX_ALLOW_DNF=1} \
   "$IMAGE_TAG" \
   --log-level "${LOG_LEVEL:-W}"

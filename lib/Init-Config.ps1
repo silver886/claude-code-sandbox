@@ -1,21 +1,18 @@
-# Init-Config.ps1 — stage system-scope Claude config into the project's
-# .claude/.system directory. Dot-sourced (not executed).
+# Init-Config.ps1 — stage system-scope agent config into the project's
+# <projectDir>\.system directory. Dot-sourced (not executed).
 #
-# Sets: $configDir, $systemDir, $configFiles, $roFiles, $roDirs
+# Requires (from Agent.ps1): $agentConfigDir, $agentProjectDir,
+# $agentManifest.
 #
-# See lib/init-config.sh for the full layout rationale. Brief summary:
+# Sets: $systemDir, $configFiles, $roFiles, $roDirs
 #
-#   $PWD\.claude\.system\
-#     ├── ro\      — wiped + re-copied each launch (CLAUDE.md, rules\, skills\, …)
-#     ├── rw\      — hardlinks each launch (.credentials.json, settings.json, .claude.json)
-#     ├── cr\      — created at runtime by Claude; persists per project
-#     └── .mask\   — empty dir, used as the bind source to mask .system\
-#                    from project scope inside the sandbox
+# Layout (same as lib/init-config.sh):
 #
-# All launchers bind the 3 writable files from $SYSTEM_DIR\rw\<f> into
-# /etc/claude-code-sandbox/<f> inside the sandbox; the rw/ hardlinks
-# share an inode with $configDir\<f> so writes propagate back to the
-# host immediately.
+#   $PWD\<projectDir>\.system\
+#     ├── ro\      wiped + re-copied each launch
+#     ├── rw\      hardlinks to host
+#     ├── cr\      runtime-created; persists per project
+#     └── .mask\   empty dir — bind source to mask .system from proj scope
 
 $stageRoFile = { param($src, $dest)
   $realInfo = [IO.File]::ResolveLinkTarget($src, $true)
@@ -36,35 +33,47 @@ $stageRwFile = { param($src, $dest)
   }
 }
 
-# Resolve a directory path through any symlink/junction chain.
 $resolveDir = { param($path)
   $info = [IO.Directory]::ResolveLinkTarget($path, $true)
   if ($info) { $info.FullName } else { $path }
 }
 
+# Recursive copy used for manifest-declared roDirs. Dereferences
+# symlinks so a symlinked skill dir lands as real content in the stage.
+$copyRoDir = { param($src, $dest)
+  [IO.Directory]::CreateDirectory($dest) > $null
+  foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($src)) {
+    $name = [IO.Path]::GetFileName($entry)
+    $out = [IO.Path]::Combine($dest, $name)
+    if ([IO.Directory]::Exists($entry)) {
+      $realSub = & $resolveDir $entry
+      & $copyRoDir $realSub $out
+    }
+    else {
+      & $stageRoFile $entry $out
+    }
+  }
+}
+
 $initConfigDir = {
-  Write-Log I config start "staging $($PWD.Path)\.claude\.system"
-  $script:configDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { [IO.Path]::Combine($HOME, '.claude') }
-  if (-not [IO.Directory]::Exists($script:configDir)) {
-    Write-Log E config fail "Claude config directory not found: $script:configDir"
-    throw "Claude config directory not found: $script:configDir"
+  Write-Log I config start "staging $($PWD.Path)\$agentProjectDir\.system"
+  if (-not [IO.Directory]::Exists($agentConfigDir)) {
+    Write-Log E config fail "$agent config directory not found: $agentConfigDir"
+    throw "$agent config directory not found: $agentConfigDir"
   }
 
-  $script:systemDir = [IO.Path]::Combine($PWD.Path, '.claude', '.system')
+  $script:systemDir = [IO.Path]::Combine($PWD.Path, $agentProjectDir, '.system')
 
-  # Warn if the project is a git repo (or worktree) and nothing in
-  # .gitignore excludes the system bucket. Credentials and session
-  # history live there. Fires both when .gitignore is missing entirely
-  # AND when it exists without a matching entry.
   $gitPath = [IO.Path]::Combine($PWD.Path, '.git')
   $gi = [IO.Path]::Combine($PWD.Path, '.gitignore')
   if ([IO.Directory]::Exists($gitPath) -or [IO.File]::Exists($gitPath)) {
     $hasMatch = $false
     if ([IO.File]::Exists($gi)) {
-      $hasMatch = [IO.File]::ReadAllText($gi) -match '(?m)^\s*/?\.claude(/(\.system)?/?)?\s*$'
+      $pattern = '(?m)^\s*/?' + [regex]::Escape($agentProjectDir) + '(/(\.system)?/?)?\s*$'
+      $hasMatch = [IO.File]::ReadAllText($gi) -match $pattern
     }
     if (-not $hasMatch) {
-      Write-Log W config gitignore "$gi does not exclude .claude/.system/; add a '.claude/.system/' entry to keep credentials and session history out of commits"
+      Write-Log W config gitignore "$gi does not exclude $agentProjectDir/.system/; add a '$agentProjectDir/.system/' entry to keep credentials and session history out of commits"
     }
   }
 
@@ -77,72 +86,40 @@ $initConfigDir = {
   [IO.Directory]::CreateDirectory($stageCr) > $null
   [IO.Directory]::CreateDirectory($stageMask) > $null
 
-  # Wipe + re-create ro/ so upstream deletions propagate and any
-  # in-session tampering on copies is undone.
   if ([IO.Directory]::Exists($stageRo)) {
     [IO.Directory]::Delete($stageRo, $true)
   }
   [IO.Directory]::CreateDirectory($stageRo) > $null
 
-  # Writable files → rw/ (hardlinks to host).
-  # Use List[string] rather than @() + `+=`; `+=` on PS arrays is O(n)
-  # (the whole array is reallocated each time) so a `+=` loop is O(n²).
   $script:configFiles = [Collections.Generic.List[string]]::new()
-  foreach ($f in '.credentials.json', 'settings.json', '.claude.json') {
-    $src = [IO.Path]::Combine($script:configDir, $f)
+  foreach ($f in (Get-AgentList '.files.rw')) {
+    $src = [IO.Path]::Combine($agentConfigDir, $f)
     if ([IO.File]::Exists($src)) {
       $script:configFiles.Add($f)
       & $stageRwFile $src ([IO.Path]::Combine($stageRw, $f))
     }
   }
 
-  # Read-only single files → ro/
   $script:roFiles = [Collections.Generic.List[string]]::new()
-  foreach ($f in 'CLAUDE.md', 'keybindings.json') {
-    $src = [IO.Path]::Combine($script:configDir, $f)
+  foreach ($f in (Get-AgentList '.files.ro')) {
+    $src = [IO.Path]::Combine($agentConfigDir, $f)
     if ([IO.File]::Exists($src)) {
       $script:roFiles.Add($f)
       & $stageRoFile $src ([IO.Path]::Combine($stageRo, $f))
     }
   }
 
-  # Read-only directories (flat) → ro/<d>/
   $script:roDirs = [Collections.Generic.List[string]]::new()
-  foreach ($d in 'rules', 'commands', 'agents', 'output-styles') {
-    $srcDir = [IO.Path]::Combine($script:configDir, $d)
+  foreach ($d in (Get-AgentList '.files.roDirs')) {
+    $srcDir = [IO.Path]::Combine($agentConfigDir, $d)
     if (-not [IO.Directory]::Exists($srcDir)) { continue }
     $realSrcDir = & $resolveDir $srcDir
     $script:roDirs.Add($d)
-    $destDir = [IO.Path]::Combine($stageRo, $d)
-    [IO.Directory]::CreateDirectory($destDir) > $null
-    foreach ($file in [IO.Directory]::EnumerateFiles($realSrcDir)) {
-      & $stageRoFile $file ([IO.Path]::Combine($destDir, [IO.Path]::GetFileName($file)))
-    }
+    & $copyRoDir $realSrcDir ([IO.Path]::Combine($stageRo, $d))
   }
 
-  # Skills (two-level) → ro/skills/<name>/
-  $skillsDir = [IO.Path]::Combine($script:configDir, 'skills')
-  if ([IO.Directory]::Exists($skillsDir)) {
-    $realSkillsDir = & $resolveDir $skillsDir
-    $script:roDirs.Add('skills')
-    [IO.Directory]::CreateDirectory([IO.Path]::Combine($stageRo, 'skills')) > $null
-    foreach ($skillDir in [IO.Directory]::EnumerateDirectories($realSkillsDir)) {
-      $name = [IO.Path]::GetFileName($skillDir)
-      $realSkillDir = & $resolveDir $skillDir
-      $destSkill = [IO.Path]::Combine($stageRo, 'skills', $name)
-      [IO.Directory]::CreateDirectory($destSkill) > $null
-      foreach ($file in [IO.Directory]::EnumerateFiles($realSkillDir)) {
-        & $stageRoFile $file ([IO.Path]::Combine($destSkill, [IO.Path]::GetFileName($file)))
-      }
-    }
-  }
-
-  # cr/ placeholders — created AFTER discovery so we only place files /
-  # dirs that the launcher will actually bind-mount on top of. Without
-  # these, podman would auto-create empty placeholder files inside cr/
-  # on the host when processing the nested -v flags. See lib/init-config.sh
-  # for the full rationale.
-  foreach ($f in [string[]]$script:configFiles + [string[]]$script:roFiles) {
+  $crPlaceholders = @($script:configFiles) + @($script:roFiles)
+  foreach ($f in $crPlaceholders) {
     $p = [IO.Path]::Combine($stageCr, $f)
     if (-not [IO.File]::Exists($p)) { [IO.File]::WriteAllText($p, '') }
   }

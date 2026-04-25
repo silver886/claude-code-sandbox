@@ -1,0 +1,27 @@
+{
+  "name": "gemini",
+  "binary": "gemini",
+  "projectDir": ".gemini",
+  "configDir": {
+    "env": "",
+    "default": "$HOME/.gemini"
+  },
+  "files": {
+    "rw":     ["oauth_creds.json", "google_accounts.json", "settings.json"],
+    "ro":     ["GEMINI.md"],
+    "roDirs": ["extensions", "commands", "policies"]
+  },
+  "credential": { "strategy": "oauth-google" },
+  "executable": {
+    "type":           "node-bundle",
+    "versionPackage": "@google/gemini-cli",
+    "tarballUrl":     "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-{version}.tgz",
+    "entryPath":      "package/bundle/gemini.js"
+  },
+  "launch": {
+    "flags": ["--yolo"],
+    "env": {
+      "GEMINI_SANDBOX": "false"
+    }
+  }
+}

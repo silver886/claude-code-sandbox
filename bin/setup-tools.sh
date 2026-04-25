@@ -1,42 +1,22 @@
-#!/bin/sh
-# setup-tools.sh — extract tool archives and set up the claude binary.
-# Usage: setup-tools.sh [--exec] [--log-level I|W|E] <archive.tar.xz>...
+#!/usr/bin/env sh
+# setup-tools.sh — extract tool archives into the agent's ~/.local/bin
+# (and ~/.local/lib for node-bundle agents). Usage:
+#   setup-tools.sh [--exec] [--log-level I|W|E] <archive.tar.xz>...
 #
-# Extracts each archive into CLAUDE_BIN_DIR (default: $HOME/.local/bin),
-# makes all files executable, then renames the claude binary so the
-# shell wrapper (claude-wrapper.sh) can take over the "claude" name.
+# Every archive is extracted into $BIN_DIR (default $HOME/.local/bin);
+# then any `*-pkg/` directories (only present for node-bundle agents)
+# are relocated to $LIB_DIR (default $HOME/.local/lib) so their JS
+# entry is shebang-exec'd by the shim baked into the tier-3 archive.
 #
-# With --exec, launches claude --dangerously-skip-permissions after setup.
+# The tier-3 archive already ships the binary pre-named ($AGENT_BINARY
+# is a symlink → agent-wrapper, plus $AGENT_BINARY-bin holds the real
+# executable or node shim). No renaming happens at runtime.
 #
-# --log-level is passed through to the wrapper under --exec and
-# controls our own logger threshold for the extract/done lines.
-# LOG_LEVEL is never read from env — every caller passes it as an arg.
+# With --exec, execs the wrapper after setup.
+# --log-level is forwarded to the wrapper under --exec.
 set -eu
 
-# Inline structured logger — same format, threshold, and color
-# semantics as lib/log.sh. $LOG_LEVEL is a local shell var only, set
-# by --log-level parsing below. Colors disabled when $NO_COLOR is set
-# or stderr is not a tty, so log files never get escape bytes.
-if [ -z "${NO_COLOR:-}" ] && [ -t 2 ]; then _LOG_C=1; else _LOG_C=; fi
-log() {
-  _ll=${LOG_LEVEL:-W}
-  case "$_ll" in i) _ll=I ;; w) _ll=W ;; e) _ll=E ;; esac
-  _t=2; case "$_ll" in I) _t=1 ;; E) _t=3 ;; esac
-  _m=1; case "$1"   in W) _m=2 ;; E) _m=3 ;; esac
-  [ "$_m" -lt "$_t" ] && return 0
-  if [ -n "$_LOG_C" ]; then
-    case "$1" in
-      I) _lc='\033[1;36mI\033[0m' ;;
-      W) _lc='\033[1;33mW\033[0m' ;;
-      E) _lc='\033[1;31mE\033[0m' ;;
-    esac
-    printf '\033[90m%s\033[0m %b \033[32m%-16s\033[0m \033[35m%-14s\033[0m %s\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$_lc" "$2" "$3" "$4" >&2
-  else
-    printf '%s %s %-16s %-14s %s\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$1" "$2" "$3" "$4" >&2
-  fi
-}
+. /usr/local/lib/agent-sandbox/log.sh
 
 LAUNCH=""
 _ARCHIVES=""
@@ -58,25 +38,51 @@ while [ $# -gt 0 ]; do
 done
 : "${LOG_LEVEL:=W}"
 
-BIN_DIR="${CLAUDE_BIN_DIR:-$HOME/.local/bin}"
+BIN_DIR="${AGENT_BIN_DIR:-$HOME/.local/bin}"
+LIB_DIR="${AGENT_LIB_DIR:-$HOME/.local/lib}"
 log I archive extract "$BIN_DIR ($_ARCHIVE_COUNT archives)"
-mkdir -p "$BIN_DIR"
+mkdir -p "$BIN_DIR" "$LIB_DIR"
+
 # Unquoted expansion intentional: $_ARCHIVES is a space-separated list
 # of archive paths (all under the cache dir, no spaces in practice).
 for archive in $_ARCHIVES; do
-  tar -xJf "$archive" -C "$BIN_DIR/"
+  tar --xz -xf "$archive" -C "$BIN_DIR/"
 done
-# Only chmod the known set extracted from the three tool archives —
-# `chmod +x "$BIN_DIR"/*` would also flip mode on any pre-existing
-# files in $BIN_DIR.
-for _f in node rg micro claude-wrapper pnpm uv uvx claude; do
-  [ -e "$BIN_DIR/$_f" ] && chmod +x "$BIN_DIR/$_f"
+
+# Move any node-bundle package dirs out of BIN_DIR into LIB_DIR so
+# their JS entries can be exec'd via the baked shim.
+for _d in "$BIN_DIR"/*-pkg; do
+  [ -d "$_d" ] || continue
+  _name=$(basename "$_d")
+  rm -rf "$LIB_DIR/$_name"
+  mv "$_d" "$LIB_DIR/$_name"
 done
-mv "$BIN_DIR/claude" "$BIN_DIR/claude-bin"
-mv "$BIN_DIR/claude-wrapper" "$BIN_DIR/claude"
+
+# Source the baked-in agent-manifest.sh so we know the agent's command
+# name for the chmod list (and the --exec launch below).
+if [ ! -f "$BIN_DIR/agent-manifest.sh" ]; then
+  log E archive fail "agent-manifest.sh not found in $BIN_DIR"; exit 1
+fi
+. "$BIN_DIR/agent-manifest.sh"
+[ -n "${AGENT_BINARY:-}" ] || { log E archive fail "AGENT_BINARY not set by agent-manifest.sh"; exit 1; }
+
+# Set the executable bit on the specific binaries we ship — not every
+# file in BIN_DIR. agent-manifest.sh is sourced (not exec'd), so it
+# should stay mode 0644. Pre-existing files under BIN_DIR are also
+# left untouched.
+#
+# Defense-in-depth: lib/tools.sh / Tools.ps1 already chmod +x before
+# packing and tar preserves mode bits on extract, so this loop is
+# normally a no-op. Kept in case a future packer, caching layer, or
+# host filesystem loses the bit in transit.
+for _name in node rg micro pnpm uv uvx "$AGENT_BINARY" "${AGENT_BINARY}-bin"; do
+  [ -f "$BIN_DIR/$_name" ] && chmod +x "$BIN_DIR/$_name"
+done
+
 log I archive done "$BIN_DIR"
 
 if [ -n "$LAUNCH" ]; then
-  log I run launch "$BIN_DIR/claude --log-level $LOG_LEVEL --dangerously-skip-permissions"
-  exec "$BIN_DIR/claude" --log-level "$LOG_LEVEL" --dangerously-skip-permissions
+  [ -x "$BIN_DIR/$AGENT_BINARY" ] || { log E run fail "$AGENT_BINARY wrapper not executable at $BIN_DIR/$AGENT_BINARY"; exit 1; }
+  log I run launch "$BIN_DIR/$AGENT_BINARY --log-level $LOG_LEVEL"
+  exec "$BIN_DIR/$AGENT_BINARY" --log-level "$LOG_LEVEL"
 fi

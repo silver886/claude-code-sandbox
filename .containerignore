@@ -1,0 +1,13 @@
+# Minimize the Podman build context. The Containerfile COPYs only the
+# five paths below; everything else (.git, per-agent project dirs
+# .claude/.gemini/.codex, host caches, etc.) would otherwise be
+# streamed to the build daemon as dead weight.
+#
+# `**` matches the entire tree; `!` re-includes specific files.
+# Parent directories of re-included files are implicitly kept.
+**
+!Containerfile
+!lib/log.sh
+!bin/enable-dnf.sh
+!bin/setup-tools.sh
+!config/sudoers-enable-dnf.tmpl

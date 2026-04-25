@@ -1,7 +1,8 @@
 param(
+  [string]$Agent = 'claude',
   [string]$BaseHash = '',
   [string]$ToolHash = '',
-  [string]$ClaudeHash = '',
+  [string]$AgentHash = '',
   [switch]$ForcePull,
   [string]$Image = 'fedora:latest',
   [switch]$AllowDnf,
@@ -9,25 +10,16 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-# Normalize to uppercase. [ValidateSet] accepts any case (PS
-# validation is case-insensitive), but we forward the literal
-# value as `--log-level <x>` to setup-tools.sh / claude-wrapper.sh
-# inside the WSL distro, and sh-side `case` is case-SENSITIVE. A
-# stray `-LogLevel i` would otherwise silently fall through to
-# the default W threshold and hide I-level logs from setup-tools,
-# setup-system-mounts, claude-wrapper, enable-dnf, etc.
 $LogLevel = $LogLevel.ToUpperInvariant()
-
-# Script-scoped LogLevel for Write-Log to read. No env var write,
-# no caller pollution — dies with the script.
 $script:LogLevel = $LogLevel
 
 $scriptDir = $PSScriptRoot
 $projectRoot = [IO.Path]::GetDirectoryName($scriptDir)
+$agent = $Agent
 . "$projectRoot\lib\Init-Launcher.ps1"
 . "$projectRoot\lib\Build-Image.ps1"
 
-$optBaseHash = $BaseHash; $optToolHash = $ToolHash; $optClaudeHash = $ClaudeHash
+$optBaseHash = $BaseHash; $optToolHash = $ToolHash; $optAgentHash = $AgentHash
 $forcePull = $ForcePull.IsPresent
 $distroName = $null
 
@@ -35,118 +27,128 @@ try {
   . $initLauncher
 
   # ── WSL distro ──
+  #
+  # Every launch imports a fresh distro and the finally block below
+  # unregisters it on exit — no reuse across sessions.
 
-  $distroSrc = (& $imageSrc) +
-               [IO.File]::ReadAllText("$projectRoot\config\wsl.conf") +
-               [IO.File]::ReadAllText("$projectRoot\bin\setup-system-mounts.sh")
-  $archiveHash = & $sha256 "$baseArchive-$toolArchive-$claudeArchive-$distroSrc-$Image"
-  $workdirHash = & $sha256 $PWD.Path
-  $distroName = "claude-$workdirHash"
+  # See script/podman-machine.sh for rationale: 128-bit MD5 → base62 → 22
+  # chars, so `sandbox-<hash>` is exactly 30 chars (Podman's cap on macOS;
+  # WSL is much looser, but we keep parity).
+  $hex = & $md5 $PWD.Path
+  # Leading '0' forces non-negative interpretation (BigInteger treats a
+  # leading hex digit >=8 as a sign bit, yielding a negative value).
+  $num = [System.Numerics.BigInteger]::Parse("0$hex", 'AllowHexSpecifier')
+  $b62 = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  $workdirHash = ''
+  while ($num -gt 0) {
+    $workdirHash = $b62[[int]($num % 62)] + $workdirHash
+    $num = $num / 62
+  }
+  while ($workdirHash.Length -lt 22) { $workdirHash = '0' + $workdirHash }
+  $distroName = "sandbox-$workdirHash"
   $distroDir = "$env:LocalAppData\$distroName"
-  $stampFile = "$distroDir\.archive-hash"
 
-  $distroExists = $false
+  # Clean up any stale distro left over from a crashed prior session.
   wsl -d $distroName -- true 2>$null
-  if ($LASTEXITCODE -eq 0) { $distroExists = $true }
-
-  $needsImport = (-not $distroExists)
-  if ($distroExists) {
-    if (-not [IO.File]::Exists($stampFile) -or [IO.File]::ReadAllText($stampFile).Trim() -ne $archiveHash) {
-      $needsImport = $true
+  if ($LASTEXITCODE -eq 0) {
+    Write-Log I distro unregister "$distroName (stale)"
+    wsl --unregister $distroName 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Log W distro unregister-fail "'$distroName' still registered (in use elsewhere?); fresh --import will fail"
     }
   }
 
-  if ($needsImport) {
-    if ($distroExists) {
-      Write-Log I distro unregister $distroName
-      wsl --unregister $distroName 2>$null
-    }
-
-    # Build base image and export as tarball for WSL import
-    . $buildBaseImage
-    Write-Log I distro export "$imageTag -> claude-base.tar"
-    $exportCtr = (Invoke-Must podman container create $imageTag true)
-    try {
-      Invoke-Must podman container export $exportCtr -o "$env:TEMP\claude-base.tar"
-    }
-    finally {
-      podman container rm $exportCtr 2>$null
-    }
-
-    [IO.Directory]::CreateDirectory($distroDir) > $null
-    try {
-      Write-Log I distro import $distroName
-      Invoke-Must wsl --import $distroName $distroDir "$env:TEMP\claude-base.tar"
-    }
-    finally {
-      [IO.File]::Delete("$env:TEMP\claude-base.tar")
-    }
-
-    # Extract tool archives and set up binaries (before disabling automount — needs /mnt/c/)
-    Write-Log I archive inject "base+tool+claude tarballs"
-    $wslSetup = & $wslSrc "$projectRoot\bin\setup-tools.sh"
-    $wslArchives = @()
-    foreach ($archive in $baseArchive, $toolArchive, $claudeArchive) {
-      $wslArchives += & $wslSrc $archive
-    }
-    Invoke-Must wsl -d $distroName -u root -- env CLAUDE_BIN_DIR=/home/claude/.local/bin sh $wslSetup --log-level $LogLevel @wslArchives
-
-    # Bake setup-system-mounts.sh into the distro at a stable in-distro
-    # path. Must happen here (while /mnt/c is still available via
-    # automount) because after wsl.conf is installed below, automount
-    # is off and /mnt/c is gone — the next launcher invocation can't
-    # reach the host file. The path matches Containerfile's existing
-    # /usr/local/libexec/claude-code-sandbox/ which the podman-exported
-    # rootfs already contains.
-    $wslSetupSys = & $wslSrc "$projectRoot\bin\setup-system-mounts.sh"
-    Invoke-Must wsl -d $distroName -u root -- cp $wslSetupSys /usr/local/libexec/claude-code-sandbox/setup-system-mounts.sh
-    Invoke-Must wsl -d $distroName -u root -- chmod +x /usr/local/libexec/claude-code-sandbox/setup-system-mounts.sh
-
-    # Write wsl.conf and terminate so it takes effect
-    $wslConf = & $wslSrc "$projectRoot\config\wsl.conf"
-    Invoke-Must wsl -d $distroName -u root -- cp $wslConf /etc/wsl.conf
-    wsl --terminate $distroName 2>$null
-    [IO.File]::WriteAllText($stampFile, $archiveHash)
+  . $buildBaseImage
+  Write-Log I distro export "$imageTag -> sandbox-base.tar"
+  $exportCtr = (Invoke-Must podman container create $imageTag true)
+  try {
+    Invoke-Must podman container export $exportCtr -o "$env:TEMP\sandbox-base.tar"
   }
+  finally {
+    podman container rm $exportCtr 2>$null
+  }
+
+  [IO.Directory]::CreateDirectory($distroDir) > $null
+  try {
+    Write-Log I distro import $distroName
+    Invoke-Must wsl --import $distroName $distroDir "$env:TEMP\sandbox-base.tar"
+  }
+  finally {
+    [IO.File]::Delete("$env:TEMP\sandbox-base.tar")
+  }
+
+  Write-Log I archive inject "base+tool+$agent tarballs"
+  $wslSetup = & $wslSrc "$projectRoot\bin\setup-tools.sh"
+  $wslArchives = @()
+  foreach ($archive in $baseArchive, $toolArchive, $agentArchive) {
+    $wslArchives += & $wslSrc $archive
+  }
+  Invoke-Must wsl -d $distroName -u root -- env AGENT_BIN_DIR=/home/agent/.local/bin AGENT_LIB_DIR=/home/agent/.local/lib sh $wslSetup --log-level $LogLevel @wslArchives
+
+  # Bake setup-system-mounts.sh into the distro at a stable path.
+  # Must happen here (while /mnt/c is still automounted) because
+  # wsl.conf below disables automount.
+  $wslSetupSys = & $wslSrc "$projectRoot\bin\setup-system-mounts.sh"
+  Invoke-Must wsl -d $distroName -u root -- cp $wslSetupSys /usr/local/libexec/agent-sandbox/setup-system-mounts.sh
+  Invoke-Must wsl -d $distroName -u root -- chmod +x /usr/local/libexec/agent-sandbox/setup-system-mounts.sh
+
+  $wslConf = & $wslSrc "$projectRoot\config\wsl.conf"
+  Invoke-Must wsl -d $distroName -u root -- cp $wslConf /etc/wsl.conf
+  wsl --terminate $distroName 2>$null
 
   # ── Mount and configure ──
-  #
-  # Single drvfs mount: workdir → /var/workdir. .system\rw\ (hardlinks
-  # to the canonical config files, populated by init-config on every
-  # launch) rides along, and the in-distro setup script binds from there.
 
+  # Mount the Windows workdir into the distro via drvfs with metadata.
+  #
+  # metadata/uid/gid/umask/fmask are required for Linux mode bits and
+  # ownership to persist on a Windows-backed mount (the default drvfs
+  # mount ignores chmod/chown silently, which makes codex's
+  # set_permissions(0o600) calls return EPERM and crash TUI bootstrap).
+  # uid/gid match the agent user pinned by the Containerfile (24368).
   Write-Log I distro mount "$($PWD.Path) -> /var/workdir"
   $winWorkdir = $PWD.Path
   Invoke-Must wsl -d $distroName -u root -- sh -c "
     mkdir -p /var/workdir &&
-    mount -t drvfs '$($winWorkdir.Replace("'", "'\''"))' /var/workdir
+    mount -t drvfs -o metadata,uid=24368,gid=24368,umask=0022,fmask=0022 '$($winWorkdir.Replace("'", "'\''"))' /var/workdir
   "
 
-  # Run setup-system-mounts.sh from its baked-in path inside the distro
-  # (installed during the import block above). claude itself is launched
-  # below as the unprivileged claude user — sudo/root is only used here
-  # to do the mount syscalls.
-  Write-Log I mounts assemble "/etc/claude-code-sandbox"
-  # Pass --log-level as an explicit arg rather than relying on env-var
-  # transport. Matches the podman-machine.sh pattern and keeps behavior
-  # consistent across sudo-crossing setup scripts.
+  Write-Log I mounts assemble "$agentSandboxDir"
+  # Encode each list as base64 of NUL-delimited UTF-8 — survives wsl.exe
+  # argv marshalling AND lets the receiver split on NUL so filenames
+  # containing spaces/quotes/newlines round-trip exactly. Empty list ⇒
+  # empty string.
+  $toNulB64 = {
+    param([string[]]$Items)
+    if (-not $Items -or $Items.Count -eq 0) { return '' }
+    $ms = [System.IO.MemoryStream]::new()
+    foreach ($s in $Items) {
+      $b = [Text.Encoding]::UTF8.GetBytes($s)
+      $ms.Write($b, 0, $b.Length)
+      $ms.WriteByte(0)
+    }
+    [Convert]::ToBase64String($ms.ToArray())
+  }
+  $cfB64 = & $toNulB64 ([string[]]$configFiles)
+  $rfB64 = & $toNulB64 ([string[]]$roFiles)
+  $rdB64 = & $toNulB64 ([string[]]$roDirs)
   Invoke-Must wsl -d $distroName -u root -- `
-    /usr/local/libexec/claude-code-sandbox/setup-system-mounts.sh `
+    /usr/local/libexec/agent-sandbox/setup-system-mounts.sh `
     --log-level $LogLevel `
     --workdir /var/workdir `
-    --target /etc/claude-code-sandbox `
-    --config-files "$($configFiles -join ' ')" `
-    --ro-files "$($roFiles -join ' ')" `
-    --ro-dirs "$($roDirs -join ' ')"
+    --project-dir $agentProjectDir `
+    --target $agentSandboxDir `
+    --config-files $cfB64 `
+    --ro-files $rfB64 `
+    --ro-dirs $rdB64
 
   # ── Launch ──
 
-  $envArgs = "CLAUDE_CONFIG_DIR=/etc/claude-code-sandbox"
-  if ($AllowDnf) { $envArgs += ' CLAUDE_ENABLE_DNF=1' }
+  $envArgs = ''
+  if ($AllowDnf) { $envArgs = 'SANDBOX_ALLOW_DNF=1' }
 
-  Write-Log I run launch "wsl -d $distroName"
+  Write-Log I run launch "wsl -d $distroName ($agent)"
   Invoke-Must wsl -d $distroName --cd /var/workdir -- sh -c "
-    exec env $envArgs `$HOME/.local/bin/claude --log-level $LogLevel --dangerously-skip-permissions
+    exec env $envArgs `$HOME/.local/bin/$agentBinary --log-level $LogLevel
   "
 }
 finally {

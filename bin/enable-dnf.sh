@@ -1,37 +1,19 @@
-#!/bin/sh
-# enable-dnf.sh — grant the claude user passwordless sudo dnf.
-# Runs inside the sandbox as root; called by claude-wrapper.sh.
+#!/usr/bin/env sh
+# enable-dnf.sh — grant the named user passwordless sudo dnf.
+# Runs inside the sandbox as root; called by agent-wrapper.sh via the
+# bootstrap sudoers rule, or directly as root for one-off setup.
+# Target user resolution (highest precedence first):
+#   1. --user USER      explicit (works when invoked directly as root)
+#   2. $SUDO_USER       inherited from sudo (the wrapper-driven path)
+# Works for both the container/WSL backends (user 'agent') and the
+# podman-machine backend (user 'core' — see bin/bootstrap-agent-user.sh
+# for why core is reused there).
+# LOG_LEVEL arrives via the `--log-level` arg (never env) because sudo
+# env_check strips unknown env vars and widening env_keep would widen
+# the bootstrap sudoers rule.
 set -eu
 
-# Inline structured logger — same format, threshold, and color
-# semantics as lib/log.sh. LOG_LEVEL is set from `--log-level` arg
-# parsing below; never inherited from env. Passed by the caller
-# (claude-wrapper.sh) as an explicit arg because sudo env_check
-# strips unknown env vars. Colors disabled when $NO_COLOR is set
-# or stderr is not a tty.
-if [ -z "${NO_COLOR:-}" ] && [ -t 2 ]; then _LOG_C=1; else _LOG_C=; fi
-log() {
-  # Normalize LOG_LEVEL to uppercase so `LOG_LEVEL=i` from env (or any
-  # future path that forgets to normalize upstream) doesn't silently
-  # fall through to the default W threshold and hide I-level logs.
-  _ll=${LOG_LEVEL:-W}
-  case "$_ll" in i) _ll=I ;; w) _ll=W ;; e) _ll=E ;; esac
-  _t=2; case "$_ll" in I) _t=1 ;; E) _t=3 ;; esac
-  _m=1; case "$1"   in W) _m=2 ;; E) _m=3 ;; esac
-  [ "$_m" -lt "$_t" ] && return 0
-  if [ -n "$_LOG_C" ]; then
-    case "$1" in
-      I) _lc='\033[1;36mI\033[0m' ;;
-      W) _lc='\033[1;33mW\033[0m' ;;
-      E) _lc='\033[1;31mE\033[0m' ;;
-    esac
-    printf '\033[90m%s\033[0m %b \033[32m%-16s\033[0m \033[35m%-14s\033[0m %s\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$_lc" "$2" "$3" "$4" >&2
-  else
-    printf '%s %s %-16s %-14s %s\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$1" "$2" "$3" "$4" >&2
-  fi
-}
+. /usr/local/lib/agent-sandbox/log.sh
 
 if [ "$(id -u)" -ne 0 ]; then
   log E dnf fail "must be run as root"
@@ -40,12 +22,13 @@ fi
 
 ENABLE=""
 PURGE=""
+USER_OPT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes)       ENABLE=1; shift ;;
     --purge)     PURGE=1; shift ;;
+    --user)      USER_OPT="$2"; shift 2 ;;
     --log-level)
-      # Accept any case — log.sh's threshold case is case-SENSITIVE.
       case "$2" in
         I|i) LOG_LEVEL=I ;;
         W|w) LOG_LEVEL=W ;;
@@ -58,14 +41,20 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+TARGET_USER="${USER_OPT:-${SUDO_USER:-}}"
+if [ -z "$TARGET_USER" ]; then
+  log E dnf fail "no target user (pass --user USER or invoke via sudo)"
+  exit 1
+fi
+
 if [ -n "$ENABLE" ]; then
-  printf 'claude ALL=(root) NOPASSWD: /usr/bin/dnf\n' > /etc/sudoers.d/claude-dnf
-  chmod 0440 /etc/sudoers.d/claude-dnf
-  log I dnf enabled "passwordless sudo dnf granted to claude"
+  printf '%s ALL=(root) NOPASSWD: /usr/bin/dnf\n' "$TARGET_USER" > "/etc/sudoers.d/${TARGET_USER}-dnf"
+  chmod 0440 "/etc/sudoers.d/${TARGET_USER}-dnf"
+  log I dnf enabled "passwordless sudo dnf granted to $TARGET_USER"
 fi
 
 if [ -n "$PURGE" ]; then
   # Remove the bootstrap sudoers rule so the agent cannot invoke this script later
-  rm -f /etc/sudoers.d/claude-enable-dnf
-  log I dnf purged "bootstrap sudoers rule removed"
+  rm -f "/etc/sudoers.d/${TARGET_USER}-enable-dnf"
+  log I dnf purged "bootstrap sudoers rule removed for $TARGET_USER"
 fi

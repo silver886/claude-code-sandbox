@@ -1,0 +1,28 @@
+{
+  "name": "claude",
+  "binary": "claude",
+  "projectDir": ".claude",
+  "configDir": {
+    "env": "CLAUDE_CONFIG_DIR",
+    "default": "$HOME/.claude"
+  },
+  "files": {
+    "rw":     [".credentials.json", "settings.json", ".claude.json"],
+    "ro":     ["CLAUDE.md", "keybindings.json"],
+    "roDirs": ["rules", "commands", "agents", "output-styles", "skills"]
+  },
+  "credential": { "strategy": "oauth-anthropic" },
+  "executable": {
+    "type":           "platform-binary",
+    "versionPackage": "@anthropic-ai/claude-code",
+    "tarballUrl":     "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-{arch}/-/claude-code-linux-{arch}-{version}.tgz",
+    "binPath":        "package/claude"
+  },
+  "launch": {
+    "flags": ["--dangerously-skip-permissions"],
+    "env": {
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+      "CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL":        "1"
+    }
+  }
+}
