@@ -43,7 +43,7 @@ wait_all() {
 
 # ── Tool archive system ──
 
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/agent-sandbox"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/crate"
 TOOLS_DIR="$CACHE_DIR/tools"
 
 # Distinct values grouped by the arch-suffix convention each tool uses.
@@ -292,8 +292,8 @@ _agent_manifest_sh_contents() {
   # Point the agent's config-dir env var at the system staging path.
   # Skipped for agents whose manifest.configDir.env is empty (Gemini) —
   # they read from the hard-coded default under $HOME, mounted there.
-  if [ -n "${AGENT_SANDBOX_ENV:-}" ]; then
-    printf "export %s='%s'\n" "$AGENT_SANDBOX_ENV" "$AGENT_SANDBOX_DIR"
+  if [ -n "${CRATE_ENV:-}" ]; then
+    printf "export %s='%s'\n" "$CRATE_ENV" "$CRATE_DIR"
   fi
   jq -r '.launch.env // {} | to_entries[] | "export \(.key)='\''\(.value)'\''"' "$AGENT_MANIFEST"
 }

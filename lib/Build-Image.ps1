@@ -20,7 +20,7 @@ $imageSrc = {
 }
 
 $buildBaseImage = {
-  $script:imageTag = "sandbox-base-$(& $sha256 "$(& $imageSrc)-$Image")"
+  $script:imageTag = "crate-base-$(& $sha256 "$(& $imageSrc)-$Image")"
   podman image exists $script:imageTag 2>$null
   if ($LASTEXITCODE -eq 0 -and -not $forcePull) {
     Write-Log I image cache-hit $script:imageTag

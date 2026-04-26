@@ -1,4 +1,6 @@
-# Agent Sandbox
+# CRATE
+
+**CRATE Runs Agents in Temporary Environments.**
 
 Run an AI coding agent — [Claude Code](https://github.com/anthropics/claude-code), [Gemini CLI](https://github.com/google-gemini/gemini-cli), or [OpenAI Codex](https://github.com/openai/codex) — inside a disposable sandbox (a Podman container, a throwaway Podman VM, or a throwaway WSL distro) so the agent's "skip all permission prompts" mode can be used without giving it access to your host.
 
@@ -48,20 +50,20 @@ From the directory you want to expose to the agent:
 
 ```sh
 # Linux / macOS — container (default agent: claude)
-/path/to/agent-sandbox/script/podman-container.sh
+/path/to/crate/script/podman-container.sh
 
 # Same, but pick a different agent
-/path/to/agent-sandbox/script/podman-container.sh --agent gemini
-/path/to/agent-sandbox/script/podman-container.sh --agent codex
+/path/to/crate/script/podman-container.sh --agent gemini
+/path/to/crate/script/podman-container.sh --agent codex
 
 # Linux / macOS — fresh VM per session
-/path/to/agent-sandbox/script/podman-machine.sh --agent claude
+/path/to/crate/script/podman-machine.sh --agent claude
 
 # Windows — container
-& C:\path\to\agent-sandbox\script\podman-container.ps1 -Agent gemini
+& C:\path\to\crate\script\podman-container.ps1 -Agent gemini
 
 # Windows — fresh WSL2 distro per session
-& C:\path\to\agent-sandbox\script\wsl.ps1 -Agent codex
+& C:\path\to\crate\script\wsl.ps1 -Agent codex
 ```
 
 All scripts accept:
@@ -83,7 +85,7 @@ All scripts accept:
 
 ### Three-tier tool cache
 
-`lib/tools.sh` and `lib/Tools.ps1` build three content-addressed `.tar.xz` archives under `$XDG_CACHE_HOME/agent-sandbox/tools/` (or `%LOCALAPPDATA%\.cache\…` on Windows). Compression is xz level 0 multi-threaded (`-0 -T0`) — `-0` is the smallest preset that still enables threaded LZMA2, trading a few MB of extra size for a ~5-10× pack speedup vs `-6`/`-9` while still beating gzip `-9` on ratio:
+`lib/tools.sh` and `lib/Tools.ps1` build three content-addressed `.tar.xz` archives under `$XDG_CACHE_HOME/crate/tools/` (or `%LOCALAPPDATA%\.cache\crate\tools\` on Windows). Compression is xz level 0 multi-threaded (`-0 -T0`) — `-0` is the smallest preset that still enables threaded LZMA2, trading a few MB of extra size for a ~5-10× pack speedup vs `-6`/`-9` while still beating gzip `-9` on ratio:
 
 1. **base** — `node` + `rg` + `micro`. Hash keyed on each tool version. Shared across all agents.
 2. **tool** — `pnpm` + `uv` + `uvx`. Hash keyed on their versions. Shared across all agents.
@@ -139,9 +141,9 @@ If an auth file is missing, you are told to run the agent's native login command
 
 | Agent | In-sandbox path | How the agent finds it |
 |-------|-----------------|------------------------|
-| Claude | `/usr/local/etc/agent-sandbox/claude` | wrapper exports `CLAUDE_CONFIG_DIR` |
-| Codex  | `/usr/local/etc/agent-sandbox/codex`  | wrapper exports `CODEX_HOME` |
-| Gemini | `/home/agent/.gemini`                 | hard-coded default (no env var supported) |
+| Claude | `/usr/local/etc/crate/claude` | wrapper exports `CLAUDE_CONFIG_DIR` |
+| Codex  | `/usr/local/etc/crate/codex`  | wrapper exports `CODEX_HOME` |
+| Gemini | `/home/agent/.gemini`         | hard-coded default (no env var supported) |
 
 The env-var route keeps `/home/agent` clean of agent-specific state and makes the sandbox path identical across the container (agent user) and podman-machine (core user) backends. Gemini doesn't expose a config-dir env var, so its staging is bind-mounted directly at the hard-coded `~/.gemini` path (rewritten to `/home/core/.gemini` on the VM backend).
 
@@ -156,9 +158,9 @@ The atomic-rename → writeFileSync fallback matters because rename semantics di
 
 - **Container scripts** assemble everything directly via podman `-v` flag stacking — no in-container privileges required.
 - **podman-machine.sh** mounts only the workdir into the VM, then runs `bin/setup-system-mounts.sh` as root over SSH to do steps 1–4.
-- **wsl.ps1** mounts only the workdir via `drvfs`, then runs `bin/setup-system-mounts.sh` as root (baked into `/usr/local/libexec/agent-sandbox/setup-system-mounts.sh` during the import block).
+- **wsl.ps1** mounts only the workdir via `drvfs`, then runs `bin/setup-system-mounts.sh` as root (baked into `/usr/local/libexec/crate/setup-system-mounts.sh` during the import block).
 
-The agent itself is launched as the unprivileged user `agent` — sudo is used solely for the mount syscalls on the VM/WSL backends. The wrapper exports each agent's config-dir env var (baked into the tier-3 `agent-manifest.sh`) so the binary reads from `/usr/local/etc/agent-sandbox/<agent>` — except for Gemini, which has no such env var and reads from the `~/.gemini` default mount.
+The agent itself is launched as the unprivileged user `agent` — sudo is used solely for the mount syscalls on the VM/WSL backends. The wrapper exports each agent's config-dir env var (baked into the tier-3 `agent-manifest.sh`) so the binary reads from `/usr/local/etc/crate/<agent>` — except for Gemini, which has no such env var and reads from the `~/.gemini` default mount.
 
 > **Supported hosts:** Linux, macOS, and Windows.
 

@@ -9,23 +9,23 @@ FROM $BASE_IMAGE
 RUN (id agent >/dev/null 2>&1 || (groupadd -g 24368 agent && useradd -m -u 24368 -g 24368 agent)) && \
     dnf install -y sudo && dnf clean all
 RUN mkdir -p /var/workdir \
-             /usr/local/lib/agent-sandbox \
-             /usr/local/libexec/agent-sandbox \
-             /usr/local/etc/agent-sandbox && \
+             /usr/local/lib/crate \
+             /usr/local/libexec/crate \
+             /usr/local/etc/crate && \
     chown -R agent:agent /var/workdir && \
-    chmod 0755 /usr/local/etc/agent-sandbox
-COPY lib/log.sh /usr/local/lib/agent-sandbox/log.sh
-COPY bin/enable-dnf.sh /usr/local/lib/agent-sandbox/enable-dnf
-COPY bin/setup-tools.sh /usr/local/libexec/agent-sandbox/setup-tools.sh
+    chmod 0755 /usr/local/etc/crate
+COPY lib/log.sh /usr/local/lib/crate/log.sh
+COPY bin/enable-dnf.sh /usr/local/lib/crate/enable-dnf
+COPY bin/setup-tools.sh /usr/local/libexec/crate/setup-tools.sh
 COPY config/sudoers-enable-dnf.tmpl /tmp/sudoers-enable-dnf.tmpl
 RUN sed 's|__USER__|agent|g' /tmp/sudoers-enable-dnf.tmpl > /etc/sudoers.d/agent-enable-dnf && \
     rm /tmp/sudoers-enable-dnf.tmpl && \
-    chmod 0755 /usr/local/lib/agent-sandbox/enable-dnf /usr/local/libexec/agent-sandbox/setup-tools.sh && \
-    chmod 0644 /usr/local/lib/agent-sandbox/log.sh && \
+    chmod 0755 /usr/local/lib/crate/enable-dnf /usr/local/libexec/crate/setup-tools.sh && \
+    chmod 0644 /usr/local/lib/crate/log.sh && \
     chmod 0440 /etc/sudoers.d/agent-enable-dnf && \
     visudo -cf /etc/sudoers.d/agent-enable-dnf
 
 ENV PATH=/home/agent/.local/bin:$PATH
 USER 24368
 WORKDIR /var/workdir
-ENTRYPOINT ["/usr/local/libexec/agent-sandbox/setup-tools.sh", "--exec", "/tmp/base.tar.xz", "/tmp/tool.tar.xz", "/tmp/agent.tar.xz"]
+ENTRYPOINT ["/usr/local/libexec/crate/setup-tools.sh", "--exec", "/tmp/base.tar.xz", "/tmp/tool.tar.xz", "/tmp/agent.tar.xz"]

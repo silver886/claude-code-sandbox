@@ -70,17 +70,17 @@ init_launcher
 # The VM backend runs the agent as the FCOS 'core' user (see
 # bin/bootstrap-agent-user.sh for why a separate uid 24368 isn't
 # viable on virtiofs). For agents without a config-dir env var
-# (gemini), agent_load anchored AGENT_SANDBOX_DIR at /home/agent —
+# (gemini), agent_load anchored CRATE_DIR at /home/agent —
 # re-anchor against /home/core so the mount target matches the
 # agent's actual $HOME inside the VM. Env-based agents (claude/codex)
-# mount at /usr/local/etc/agent-sandbox/<agent>, independent of $HOME
+# mount at /usr/local/etc/crate/<agent>, independent of $HOME
 # (the env var, baked into agent-manifest.sh, points there) — leave
 # them untouched.
-if [ -z "$AGENT_SANDBOX_ENV" ]; then
+if [ -z "$CRATE_ENV" ]; then
   _default=$(agent_get .configDir.default)
   case "$_default" in
-    '$HOME'*) AGENT_SANDBOX_DIR="/home/core${_default#\$HOME}" ;;
-    *)        AGENT_SANDBOX_DIR="$_default" ;;
+    '$HOME'*) CRATE_DIR="/home/core${_default#\$HOME}" ;;
+    *)        CRATE_DIR="$_default" ;;
   esac
 fi
 
@@ -102,7 +102,7 @@ stop_all_machines() {
 }
 
 # 128-bit MD5 of $PWD encoded as 22 base62 chars (zero-padded). With the
-# `sandbox-` prefix the name is exactly 30 chars, the macOS Podman cap
+# `crate-` prefix the name is 28 chars, under the macOS Podman 30-char cap
 # (driven by the AF_UNIX socket-path budget). bc is required because
 # 128-bit ints exceed POSIX shell arithmetic; awk does the digit→char
 # mapping in the same pipeline so the encoder is a single 3-process
@@ -132,7 +132,7 @@ case "$WORKDIR_HASH" in
     log E launcher hash-fail "encoder produced all-zero hash (bc/awk pipeline failed silently); check ulimit -n"
     exit 1 ;;
 esac
-MACHINE_NAME="sandbox-$WORKDIR_HASH"
+MACHINE_NAME="crate-$WORKDIR_HASH"
 
 podman machine stop "$MACHINE_NAME" 2>/dev/null || true
 podman machine rm -f "$MACHINE_NAME" 2>/dev/null || true
@@ -149,9 +149,9 @@ podman machine start "$MACHINE_NAME"
 # before any bin/*.sh that sources it runs).
 log I vm setup "installing log.sh"
 cat "$PROJECT_ROOT/lib/log.sh" | podman machine ssh "$MACHINE_NAME" \
-  'sudo install -d -m 0755 /usr/local/lib/agent-sandbox && sudo tee /usr/local/lib/agent-sandbox/log.sh >/dev/null && sudo chmod 0644 /usr/local/lib/agent-sandbox/log.sh'
+  'sudo install -d -m 0755 /usr/local/lib/crate && sudo tee /usr/local/lib/crate/log.sh >/dev/null && sudo chmod 0644 /usr/local/lib/crate/log.sh'
 
-log I mounts assemble "$AGENT_SANDBOX_DIR"
+log I mounts assemble "$CRATE_DIR"
 cat "$PROJECT_ROOT/bin/setup-system-mounts.sh" | podman machine ssh "$MACHINE_NAME" \
   'cat > /tmp/setup-system-mounts.sh && chmod +x /tmp/setup-system-mounts.sh'
 
@@ -171,7 +171,7 @@ podman machine ssh "$MACHINE_NAME" \
      --log-level ${LOG_LEVEL:-W} \
      --workdir /var/workdir \
      --project-dir '$AGENT_PROJECT_DIR' \
-     --target '$AGENT_SANDBOX_DIR' \
+     --target '$CRATE_DIR' \
      --config-files '$_CF_B64' \
      --ro-files '$_RF_B64' \
      --ro-dirs '$_RD_B64'"
@@ -194,7 +194,7 @@ podman machine ssh "$MACHINE_NAME" "/tmp/setup-tools.sh --log-level ${LOG_LEVEL:
 # membership and per-user rules are independent in sudoers.
 log I vm install-dnf "enable-dnf + sudoers rule for core"
 cat "$PROJECT_ROOT/bin/enable-dnf.sh" | podman machine ssh "$MACHINE_NAME" \
-  'sudo tee /usr/local/lib/agent-sandbox/enable-dnf >/dev/null && sudo chmod 0755 /usr/local/lib/agent-sandbox/enable-dnf'
+  'sudo tee /usr/local/lib/crate/enable-dnf >/dev/null && sudo chmod 0755 /usr/local/lib/crate/enable-dnf'
 sed 's|__USER__|core|g' "$PROJECT_ROOT/config/sudoers-enable-dnf.tmpl" | podman machine ssh "$MACHINE_NAME" \
   'sudo tee /etc/sudoers.d/core-enable-dnf >/dev/null && sudo chmod 0440 /etc/sudoers.d/core-enable-dnf && sudo visudo -cf /etc/sudoers.d/core-enable-dnf'
 
@@ -222,7 +222,7 @@ SSH_KEY=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.Identity
 # there's no parent shell remaining for a TTY hijack (TIOCSTI) on
 # agent exit; ssh closes when the agent process does.
 _ENV=""
-[ -n "$ALLOW_DNF" ] && _ENV="$_ENV SANDBOX_ALLOW_DNF=1"
+[ -n "$ALLOW_DNF" ] && _ENV="$_ENV CRATE_ALLOW_DNF=1"
 log I run launch "ssh -tt core@localhost (machine $MACHINE_NAME, agent $AGENT)"
 ssh -tt -p "$SSH_PORT" -i "$SSH_KEY" \
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \

@@ -11,7 +11,7 @@
 #   --workdir     DIR    host workdir mount point (default: /var/workdir)
 #   --project-dir NAME   agent's project dir basename, e.g. ".claude",
 #                        ".gemini", ".codex"
-#   --target      DIR    sandbox config dir (e.g. /usr/local/etc/agent-sandbox/claude
+#   --target      DIR    sandbox config dir (e.g. /usr/local/etc/crate/claude
 #                        when the agent honors a config-dir env var, or
 #                        /home/agent/.gemini for agents that don't)
 #   --config-files B64   base64 of NUL-delimited rw file basenames
@@ -35,7 +35,7 @@
 #   5. mask project-scope .system by bind-mounting .system/.mask over it
 set -euo pipefail
 
-. /usr/local/lib/agent-sandbox/log.sh
+. /usr/local/lib/crate/log.sh
 
 WORKDIR=/var/workdir
 PROJECT_DIR=""

@@ -9,15 +9,15 @@
 #   AGENT_BINARY        — e.g. "claude"
 #   AGENT_PROJECT_DIR   — e.g. ".claude" (host staging dir base)
 #   AGENT_CONFIG_DIR    — expanded host config dir path (respects env override)
-#   AGENT_SANDBOX_DIR   — in-sandbox config dir (mount target)
-#   AGENT_SANDBOX_ENV   — name of the env var the wrapper exports inside
-#                         the sandbox to point the agent at AGENT_SANDBOX_DIR
+#   CRATE_DIR           — in-sandbox config dir (mount target)
+#   CRATE_ENV           — name of the env var the wrapper exports inside
+#                         the sandbox to point the agent at CRATE_DIR
 #                         (empty for agents without such an env var)
 #
 # Sandbox-side path policy:
 #   - If the manifest declares configDir.env (Claude CLAUDE_CONFIG_DIR,
 #     Codex CODEX_HOME, …) we stage config at a fixed system path
-#     /usr/local/etc/agent-sandbox/<agent> and set that env var in the
+#     /usr/local/etc/crate/<agent> and set that env var in the
 #     wrapper so the binary reads from there. Keeps /home/agent clean
 #     and removes the podman-machine /home/agent→/home/core rewrite
 #     for agents that honor the env.
@@ -58,13 +58,13 @@ agent_load() {
     esac
   fi
 
-  AGENT_SANDBOX_ENV="$_env_name"
+  CRATE_ENV="$_env_name"
   if [ -n "$_env_name" ]; then
-    AGENT_SANDBOX_DIR="/usr/local/etc/agent-sandbox/$AGENT"
+    CRATE_DIR="/usr/local/etc/crate/$AGENT"
   else
     case "$_default" in
-      '$HOME'*) AGENT_SANDBOX_DIR="/home/agent${_default#\$HOME}" ;;
-      *)        AGENT_SANDBOX_DIR="$_default" ;;
+      '$HOME'*) CRATE_DIR="/home/agent${_default#\$HOME}" ;;
+      *)        CRATE_DIR="$_default" ;;
     esac
   fi
 }

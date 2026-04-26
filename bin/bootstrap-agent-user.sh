@@ -26,7 +26,7 @@
 # invokes sudo — and after this script runs, no sudo is available
 # anyway, regardless.
 set -eu
-. /usr/local/lib/agent-sandbox/log.sh
+. /usr/local/lib/crate/log.sh
 
 for _g in sudo wheel; do
   if id -nG core | tr ' ' '\n' | grep -qx "$_g"; then

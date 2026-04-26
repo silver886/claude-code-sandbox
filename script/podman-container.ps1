@@ -30,28 +30,28 @@ Write-Log I run launch "podman container run $imageTag ($agent)"
 # ── Run ──
 #
 # System config assembly via podman -v stacking:
-#   1. cr/ as the base of $agentSandboxDir (rw, persists per project)
+#   1. cr/ as the base of $crateDir (rw, persists per project)
 #   2. rw/<f> per-file mounts shadow cr at <f> with host hardlinks
 #   3. ro/<x>:ro per-file/per-subdir mounts shadow cr at <x>, read-only
 #   4. .mask/ bind-mounted (read-only) over /var/workdir/<projectDir>/.system
 
 $systemDirWsl = & $wslSrc $systemDir
-$extraArgs = @('-v', "${systemDirWsl}/cr:${agentSandboxDir}")
+$extraArgs = @('-v', "${systemDirWsl}/cr:${crateDir}")
 foreach ($f in $configFiles) {
   $extraArgs += '-v'
-  $extraArgs += "${systemDirWsl}/rw/${f}:${agentSandboxDir}/${f}"
+  $extraArgs += "${systemDirWsl}/rw/${f}:${crateDir}/${f}"
 }
 foreach ($f in $roFiles) {
   $extraArgs += '-v'
-  $extraArgs += "${systemDirWsl}/ro/${f}:${agentSandboxDir}/${f}:ro"
+  $extraArgs += "${systemDirWsl}/ro/${f}:${crateDir}/${f}:ro"
 }
 foreach ($d in $roDirs) {
   $extraArgs += '-v'
-  $extraArgs += "${systemDirWsl}/ro/${d}:${agentSandboxDir}/${d}:ro"
+  $extraArgs += "${systemDirWsl}/ro/${d}:${crateDir}/${d}:ro"
 }
 $extraArgs += '-v'
 $extraArgs += "${systemDirWsl}/.mask:/var/workdir/${agentProjectDir}/.system:ro"
-if ($AllowDnf) { $extraArgs += '--env', 'SANDBOX_ALLOW_DNF=1' }
+if ($AllowDnf) { $extraArgs += '--env', 'CRATE_ALLOW_DNF=1' }
 
 Invoke-Must podman container run --interactive --tty --rm `
   '--userns=keep-id:uid=24368,gid=24368' `

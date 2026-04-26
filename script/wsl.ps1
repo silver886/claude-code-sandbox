@@ -32,8 +32,8 @@ try {
   # unregisters it on exit — no reuse across sessions.
 
   # See script/podman-machine.sh for rationale: 128-bit MD5 → base62 → 22
-  # chars, so `sandbox-<hash>` is exactly 30 chars (Podman's cap on macOS;
-  # WSL is much looser, but we keep parity).
+  # chars, so `crate-<hash>` is 28 chars (under Podman's 30-char cap on
+  # macOS; WSL is much looser, but we keep parity).
   $hex = & $md5 $PWD.Path
   # Leading '0' forces non-negative interpretation (BigInteger treats a
   # leading hex digit >=8 as a sign bit, yielding a negative value).
@@ -45,7 +45,7 @@ try {
     $num = $num / 62
   }
   while ($workdirHash.Length -lt 22) { $workdirHash = '0' + $workdirHash }
-  $distroName = "sandbox-$workdirHash"
+  $distroName = "crate-$workdirHash"
   $distroDir = "$env:LocalAppData\$distroName"
 
   # Clean up any stale distro left over from a crashed prior session.
@@ -59,10 +59,10 @@ try {
   }
 
   . $buildBaseImage
-  Write-Log I distro export "$imageTag -> sandbox-base.tar"
+  Write-Log I distro export "$imageTag -> crate-base.tar"
   $exportCtr = (Invoke-Must podman container create $imageTag true)
   try {
-    Invoke-Must podman container export $exportCtr -o "$env:TEMP\sandbox-base.tar"
+    Invoke-Must podman container export $exportCtr -o "$env:TEMP\crate-base.tar"
   }
   finally {
     podman container rm $exportCtr 2>$null
@@ -71,10 +71,10 @@ try {
   [IO.Directory]::CreateDirectory($distroDir) > $null
   try {
     Write-Log I distro import $distroName
-    Invoke-Must wsl --import $distroName $distroDir "$env:TEMP\sandbox-base.tar"
+    Invoke-Must wsl --import $distroName $distroDir "$env:TEMP\crate-base.tar"
   }
   finally {
-    [IO.File]::Delete("$env:TEMP\sandbox-base.tar")
+    [IO.File]::Delete("$env:TEMP\crate-base.tar")
   }
 
   Write-Log I archive inject "base+tool+$agent tarballs"
@@ -89,8 +89,8 @@ try {
   # Must happen here (while /mnt/c is still automounted) because
   # wsl.conf below disables automount.
   $wslSetupSys = & $wslSrc "$projectRoot\bin\setup-system-mounts.sh"
-  Invoke-Must wsl -d $distroName -u root -- cp $wslSetupSys /usr/local/libexec/agent-sandbox/setup-system-mounts.sh
-  Invoke-Must wsl -d $distroName -u root -- chmod +x /usr/local/libexec/agent-sandbox/setup-system-mounts.sh
+  Invoke-Must wsl -d $distroName -u root -- cp $wslSetupSys /usr/local/libexec/crate/setup-system-mounts.sh
+  Invoke-Must wsl -d $distroName -u root -- chmod +x /usr/local/libexec/crate/setup-system-mounts.sh
 
   $wslConf = & $wslSrc "$projectRoot\config\wsl.conf"
   Invoke-Must wsl -d $distroName -u root -- cp $wslConf /etc/wsl.conf
@@ -112,7 +112,7 @@ try {
     mount -t drvfs -o metadata,uid=24368,gid=24368,umask=0022,fmask=0022 '$($winWorkdir.Replace("'", "'\''"))' /var/workdir
   "
 
-  Write-Log I mounts assemble "$agentSandboxDir"
+  Write-Log I mounts assemble "$crateDir"
   # Encode each list as base64 of NUL-delimited UTF-8 — survives wsl.exe
   # argv marshalling AND lets the receiver split on NUL so filenames
   # containing spaces/quotes/newlines round-trip exactly. Empty list ⇒
@@ -132,11 +132,11 @@ try {
   $rfB64 = & $toNulB64 ([string[]]$roFiles)
   $rdB64 = & $toNulB64 ([string[]]$roDirs)
   Invoke-Must wsl -d $distroName -u root -- `
-    /usr/local/libexec/agent-sandbox/setup-system-mounts.sh `
+    /usr/local/libexec/crate/setup-system-mounts.sh `
     --log-level $LogLevel `
     --workdir /var/workdir `
     --project-dir $agentProjectDir `
-    --target $agentSandboxDir `
+    --target $crateDir `
     --config-files $cfB64 `
     --ro-files $rfB64 `
     --ro-dirs $rdB64
@@ -144,7 +144,7 @@ try {
   # ── Launch ──
 
   $envArgs = ''
-  if ($AllowDnf) { $envArgs = 'SANDBOX_ALLOW_DNF=1' }
+  if ($AllowDnf) { $envArgs = 'CRATE_ALLOW_DNF=1' }
 
   Write-Log I run launch "wsl -d $distroName ($agent)"
   Invoke-Must wsl -d $distroName --cd /var/workdir -- sh -c "

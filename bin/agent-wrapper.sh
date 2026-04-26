@@ -4,7 +4,7 @@
 # it) to load AGENT_BINARY, AGENT_LAUNCH_FLAGS, and per-agent env
 # exports, then execs the real agent binary.
 
-. /usr/local/lib/agent-sandbox/log.sh
+. /usr/local/lib/crate/log.sh
 
 # Parse --log-level off the front of the arg list before forwarding
 # the rest to the agent binary. We don't read LOG_LEVEL from env at
@@ -34,11 +34,11 @@ esac
 [ -f "${_dir:-}/agent-manifest.sh" ] || _dir="$HOME/.local/bin"
 . "$_dir/agent-manifest.sh"
 
-if [ -x /usr/local/lib/agent-sandbox/enable-dnf ]; then
+if [ -x /usr/local/lib/crate/enable-dnf ]; then
   # Always call enable-dnf --purge to drop the bootstrap sudoers rule
   # before the agent starts — so the agent can't invoke enable-dnf
   # later to grant itself dnf. Add --yes only when the user opted in
-  # with SANDBOX_ALLOW_DNF=1 (set by the launcher's --allow-dnf flag).
+  # with CRATE_ALLOW_DNF=1 (set by the launcher's --allow-dnf flag).
   # Pass log level as an explicit arg: Fedora sudoers env_check
   # strips unknown env vars even with --preserve-env=, and adding
   # LOG_LEVEL to env_keep would widen the bootstrap sudoers rule.
@@ -47,10 +47,10 @@ if [ -x /usr/local/lib/agent-sandbox/enable-dnf ]; then
   # place — fail loudly rather than exec the agent with a latent
   # privilege-escalation path still available.
   _DNF_LVL="--log-level $LOG_LEVEL"
-  if [ -n "${SANDBOX_ALLOW_DNF:-}" ]; then
-    sudo /usr/local/lib/agent-sandbox/enable-dnf $_DNF_LVL --yes --purge
+  if [ -n "${CRATE_ALLOW_DNF:-}" ]; then
+    sudo /usr/local/lib/crate/enable-dnf $_DNF_LVL --yes --purge
   else
-    sudo /usr/local/lib/agent-sandbox/enable-dnf $_DNF_LVL --purge
+    sudo /usr/local/lib/crate/enable-dnf $_DNF_LVL --purge
   fi
   _rc=$?
   if [ "$_rc" -ne 0 ]; then

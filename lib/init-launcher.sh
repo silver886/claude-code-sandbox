@@ -23,7 +23,7 @@ set -o pipefail
 
 init_launcher() {
   agent_load
-  log I launcher start "agent-sandbox ($AGENT) $0"
+  log I launcher start "CRATE ($AGENT) $0"
   "$PROJECT_ROOT/lib/ensure-credential.sh" --agent "$AGENT" --log-level "${LOG_LEVEL:-W}"
   init_config_dir
   detect_arch

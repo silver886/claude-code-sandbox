@@ -8,13 +8,13 @@
 #   $agentBinary        — e.g. "claude"
 #   $agentProjectDir    — e.g. ".claude"
 #   $agentConfigDir     — expanded host config dir (respects env override)
-#   $agentSandboxDir    — in-sandbox config dir (mount target)
-#   $agentSandboxEnv    — env var name the wrapper sets inside the sandbox
-#                         to point at $agentSandboxDir; empty if the agent
+#   $crateDir           — in-sandbox config dir (mount target)
+#   $crateEnv           — env var name the wrapper sets inside the sandbox
+#                         to point at $crateDir; empty if the agent
 #                         has no config-dir env var (Gemini)
 #
 # Sandbox-side path policy (see lib/agent.sh for the rationale):
-#   - With configDir.env present, stage at /usr/local/etc/agent-sandbox/<agent>
+#   - With configDir.env present, stage at /usr/local/etc/crate/<agent>
 #     and let the wrapper export the env var.
 #   - Without it, mount at the default path with $HOME rewritten to /home/agent.
 #
@@ -52,15 +52,15 @@ function Invoke-AgentLoad {
     }
   }
 
-  $script:agentSandboxEnv = $envName
+  $script:crateEnv = $envName
   if ($envName) {
-    $script:agentSandboxDir = "/usr/local/etc/agent-sandbox/$agent"
+    $script:crateDir = "/usr/local/etc/crate/$agent"
   }
   elseif ($defaultPath.StartsWith('$HOME')) {
-    $script:agentSandboxDir = '/home/agent' + $defaultPath.Substring('$HOME'.Length)
+    $script:crateDir = '/home/agent' + $defaultPath.Substring('$HOME'.Length)
   }
   else {
-    $script:agentSandboxDir = $defaultPath
+    $script:crateDir = $defaultPath
   }
 }
 

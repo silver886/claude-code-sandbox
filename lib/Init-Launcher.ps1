@@ -34,7 +34,7 @@ $wslSrc = { param($p)
 
 $initLauncher = {
   Invoke-AgentLoad
-  Write-Log I launcher start "agent-sandbox ($agent) $($MyInvocation.ScriptName)"
+  Write-Log I launcher start "CRATE ($agent) $($MyInvocation.ScriptName)"
   & "$projectRoot\lib\Ensure-Credential.ps1" -Agent $agent -LogLevel $script:LogLevel
   . $initConfigDir
   . $detectArch

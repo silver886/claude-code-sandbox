@@ -15,11 +15,11 @@ $md5 = {
 }
 
 $http = [Net.Http.HttpClient]::new()
-$http.DefaultRequestHeaders.UserAgent.ParseAdd('agent-sandbox/1.0')
+$http.DefaultRequestHeaders.UserAgent.ParseAdd('crate/1.0')
 
 # ── Tool archive system ──
 
-$cacheDir = if ($env:XDG_CACHE_HOME) { "$env:XDG_CACHE_HOME\agent-sandbox" } else { "$HOME\.cache\agent-sandbox" }
+$cacheDir = if ($env:XDG_CACHE_HOME) { "$env:XDG_CACHE_HOME\crate" } else { "$HOME\.cache\crate" }
 $toolsDir = "$cacheDir\tools"
 
 # Distinct values grouped by the arch-suffix convention each tool uses.
@@ -181,7 +181,7 @@ $tierBuilder = {
   }
 
   $h = [Net.Http.HttpClient]::new()
-  $h.DefaultRequestHeaders.UserAgent.ParseAdd('agent-sandbox/1.0')
+  $h.DefaultRequestHeaders.UserAgent.ParseAdd('crate/1.0')
   $tmpDir = [IO.Path]::Combine([IO.Path]::GetTempPath(), "agent-build-$(Get-Random)")
   [IO.Directory]::CreateDirectory($tmpDir) > $null
   try {
@@ -335,8 +335,8 @@ $agentManifestShContents = {
   [void]$sb.Append("AGENT_LAUNCH_FLAGS='$($flags -join ' ')'`n")
   # Point the agent's config-dir env var at the system staging path.
   # Skipped for agents whose manifest.configDir.env is empty (Gemini).
-  if ($script:agentSandboxEnv) {
-    [void]$sb.Append("export $($script:agentSandboxEnv)='$($script:agentSandboxDir)'`n")
+  if ($script:crateEnv) {
+    [void]$sb.Append("export $($script:crateEnv)='$($script:crateDir)'`n")
   }
   $envKv = Get-AgentKv '.launch.env'
   foreach ($k in $envKv.Keys) {

@@ -16,7 +16,7 @@
 # --log-level is forwarded to the wrapper under --exec.
 set -eu
 
-. /usr/local/lib/agent-sandbox/log.sh
+. /usr/local/lib/crate/log.sh
 
 LAUNCH=""
 _ARCHIVES=""

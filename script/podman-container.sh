@@ -62,7 +62,7 @@ _IMG_HASHES=""
 for _f in Containerfile lib/log.sh bin/enable-dnf.sh bin/setup-tools.sh config/sudoers-enable-dnf.tmpl; do
   _IMG_HASHES="$_IMG_HASHES$(sha256_file "$PROJECT_ROOT/$_f")"
 done
-IMAGE_TAG="sandbox-base-$(sha256 "$_IMG_HASHES-$BASE_IMAGE")"
+IMAGE_TAG="crate-base-$(sha256 "$_IMG_HASHES-$BASE_IMAGE")"
 if podman image exists "$IMAGE_TAG" 2>/dev/null && [ -z "${FORCE_PULL:-}" ]; then
   log I image cache-hit "$IMAGE_TAG"
 else
@@ -76,21 +76,21 @@ fi
 # ── Run ──
 #
 # System config assembly via podman -v stacking:
-#   1. cr/ as the base of $AGENT_SANDBOX_DIR (rw, persists per project)
+#   1. cr/ as the base of $CRATE_DIR (rw, persists per project)
 #   2. rw/<f> per-file mounts (EBUSY → in-place writeFileSync → host sync)
 #   3. ro/<x>:ro per-file/per-subdir (read-only)
 #   4. .mask/ bind (read-only) over /var/workdir/<projectDir>/.system
 #      to mask system scope from project scope
 
-set -- -v "$SYSTEM_DIR/cr:$AGENT_SANDBOX_DIR"
+set -- -v "$SYSTEM_DIR/cr:$CRATE_DIR"
 for _f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
-  set -- "$@" -v "$SYSTEM_DIR/rw/$_f:$AGENT_SANDBOX_DIR/$_f"
+  set -- "$@" -v "$SYSTEM_DIR/rw/$_f:$CRATE_DIR/$_f"
 done
 for _f in ${RO_FILES[@]+"${RO_FILES[@]}"}; do
-  set -- "$@" -v "$SYSTEM_DIR/ro/$_f:$AGENT_SANDBOX_DIR/$_f:ro"
+  set -- "$@" -v "$SYSTEM_DIR/ro/$_f:$CRATE_DIR/$_f:ro"
 done
 for _d in ${RO_DIRS[@]+"${RO_DIRS[@]}"}; do
-  set -- "$@" -v "$SYSTEM_DIR/ro/$_d:$AGENT_SANDBOX_DIR/$_d:ro"
+  set -- "$@" -v "$SYSTEM_DIR/ro/$_d:$CRATE_DIR/$_d:ro"
 done
 
 log I run launch "podman container run $IMAGE_TAG ($AGENT)"
@@ -104,6 +104,6 @@ podman container run --interactive --tty --rm \
   "$@" \
   -v "$SYSTEM_DIR/.mask:/var/workdir/$AGENT_PROJECT_DIR/.system:ro" \
   --workdir /var/workdir \
-  ${ALLOW_DNF:+--env SANDBOX_ALLOW_DNF=1} \
+  ${ALLOW_DNF:+--env CRATE_ALLOW_DNF=1} \
   "$IMAGE_TAG" \
   --log-level "${LOG_LEVEL:-W}"

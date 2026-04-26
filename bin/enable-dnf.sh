@@ -13,7 +13,7 @@
 # the bootstrap sudoers rule.
 set -eu
 
-. /usr/local/lib/agent-sandbox/log.sh
+. /usr/local/lib/crate/log.sh
 
 if [ "$(id -u)" -ne 0 ]; then
   log E dnf fail "must be run as root"
