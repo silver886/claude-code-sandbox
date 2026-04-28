@@ -388,10 +388,10 @@ $resolveSessionId = {
 $preflightWslPaths = {
   if (-not $IsWindows) { return }
   $checks = @(
-    @{ Name = '$PWD';            Value = $PWD.Path }
-    @{ Name = '$projectRoot';    Value = $projectRoot }
-    @{ Name = '$cacheDir';       Value = $cacheDir }
-    @{ Name = '$env:TEMP';       Value = $env:TEMP }
+    @{ Name = '$PWD'; Value = $PWD.Path }
+    @{ Name = '$projectRoot'; Value = $projectRoot }
+    @{ Name = '$cacheDir'; Value = $cacheDir }
+    @{ Name = '$env:TEMP'; Value = $env:TEMP }
     @{ Name = '$env:LocalAppData'; Value = $env:LocalAppData }
   )
   foreach ($c in $checks) {

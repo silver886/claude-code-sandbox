@@ -199,11 +199,41 @@ reclaim_abandoned_machines() {
 # init_launcher → resolve_session_id) as the VM identity. Format:
 # `crate-<agent>-<sessionId>`. Budget under macOS Podman's 30-char cap
 # (AF_UNIX socket path):
-#   crate- (6) + agent (≤6) + - (1) + 8 = 21 chars (claude/gemini/codex).
+#   crate- (6) + agent (≤15) + - (1) + 8 = ≤30 chars.
+# Built-in agents (claude/codex/gemini) sit at 21; agent_load only
+# whitelists the AGENT charset — not its length — so a custom agent
+# dropped in via agent/<name>/manifest.json can silently exceed the cap
+# and fail mid-bootstrap inside `podman machine init`. Validate AGENT
+# length before composing MACHINE_NAME so the EXIT trap's teardown
+# branch (guarded by `[ -n "$MACHINE_NAME" ]`) doesn't fire on a name
+# we never actually used. Gate here at the call site rather than in
+# agent_load: this 30-char cap is backend-specific (macOS Podman
+# AF_UNIX), not a universal constraint on agent names.
+if [ "${#AGENT}" -gt 15 ]; then
+  log E vm name-too-long "agent name '$AGENT' is ${#AGENT} chars; must be <=15 to keep 'crate-<agent>-<8>' under macOS Podman's 30-char AF_UNIX socket cap"
+  exit 1
+fi
 MACHINE_NAME="crate-$AGENT-$SESSION_ID"
 
 reclaim_abandoned_machines
 check_running_machines
+
+# Preflight: marker-less leak check. reclaim_abandoned_machines only
+# handles machines that still have a $STATE_DIR marker. If the marker
+# is missing (manual state-dir wipe, host migration) but the machine
+# still exists under our deterministic name, `podman machine init`
+# below would fail with "machine already exists" and the launcher
+# would offer no automatic recovery. Try a best-effort teardown; if
+# the machine survives, exit with a targeted remediation message.
+if podman machine inspect "$MACHINE_NAME" >/dev/null 2>&1; then
+  log W vm reclaim "marker-less leak: machine '$MACHINE_NAME' already exists; attempting teardown"
+  podman machine stop "$MACHINE_NAME" 2>/dev/null || true
+  podman machine rm -f "$MACHINE_NAME" 2>/dev/null || true
+  if podman machine inspect "$MACHINE_NAME" >/dev/null 2>&1; then
+    log E vm reclaim-fail "machine '$MACHINE_NAME' still registered after teardown; remove it manually with: podman machine rm -f $MACHINE_NAME"
+    exit 1
+  fi
+fi
 
 # Register this machine before init: if init/start fails, the trap will
 # remove the half-created machine AND this state file together. KV

@@ -42,8 +42,8 @@ $assertUnderConfig = { param($real, $orig)
     param($p)
     if (-not $p) { return $false }
     [string]::Equals($cmp, $p, $oic) -or
-      $cmp.StartsWith($p + '/', $oic) -or
-      $cmp.StartsWith($p + '\', $oic)
+    $cmp.StartsWith($p + '/', $oic) -or
+    $cmp.StartsWith($p + '\', $oic)
   }
   if (& $under $script:realConfigDir) { return }
   foreach ($trusted in $script:agentTrustedRoots) {

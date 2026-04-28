@@ -160,9 +160,40 @@ try {
   # Reuse the launcher's resolved $sessionId (8-char base36, set by
   # Init-Launcher.ps1 → $resolveSessionId) as the distro identity, so
   # backend name and session config dir share one id. Format:
-  # `crate-<agent>-<sessionId>` (≤21 chars).
+  # `crate-<agent>-<sessionId>`. Built-in agents land at 21 chars; cap
+  # at 30 to match the podman-machine backend (AF_UNIX cap on macOS) so
+  # custom agents added via agent/<name>/manifest.json can't silently
+  # exceed the budget on either backend. Validate $agent length before
+  # composing $distroName so the finally block's teardown branch
+  # (guarded by `if ($distroName)`) doesn't fire on a name we never
+  # actually used. Gate at the call site rather than in agent_load: the
+  # constraint is backend-specific.
+  if ($agent.Length -gt 15) {
+    Write-Log E distro name-too-long "agent name '$agent' is $($agent.Length) chars; must be <=15 to keep 'crate-<agent>-<8>' at <=30"
+    exit 1
+  }
   $distroName = "crate-$agent-$sessionId"
   $distroDir = "$env:LocalAppData\$distroName"
+
+  # Preflight: marker-less leak check. The reclaim loop above only
+  # handles distros that still have a $stateDir marker. If the marker
+  # is missing (manual state-dir wipe, profile migration) but the
+  # distro still exists under our deterministic name, `wsl --import`
+  # below would fail with "distro already exists" and the launcher
+  # would offer no automatic recovery. Try a best-effort teardown; if
+  # the distro or backing dir survives, exit with a targeted message.
+  if (Test-WslDistroRegistered $distroName) {
+    Write-Log W distro reclaim "marker-less leak: distro '$distroName' already exists; attempting teardown"
+    wsl --terminate $distroName 2>$null
+    wsl --unregister $distroName 2>$null
+    if ([IO.Directory]::Exists($distroDir)) {
+      try { [IO.Directory]::Delete($distroDir, $true) } catch {}
+    }
+    if ((Test-WslDistroRegistered $distroName) -or [IO.Directory]::Exists($distroDir)) {
+      Write-Log E distro reclaim-fail "distro '$distroName' or its backing dir still present after teardown; remove manually with: wsl --unregister $distroName"
+      exit 1
+    }
+  }
 
   # Register this distro before --import: if import fails, the finally
   # below removes the half-created distro AND this state file together.

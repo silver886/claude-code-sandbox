@@ -200,7 +200,7 @@ function Invoke-AgentLoad {
   $script:agentTrustedRoots = [Collections.Generic.List[string]]::new()
   $rawRoots = @()
   if ($script:agentManifest.PSObject.Properties.Name -contains 'trustedSymlinkRoots' -and
-      $null -ne $script:agentManifest.trustedSymlinkRoots) {
+    $null -ne $script:agentManifest.trustedSymlinkRoots) {
     $rawRoots = [string[]](@($script:agentManifest.trustedSymlinkRoots))
   }
   $homeForTrust = [IO.Path]::GetFullPath($HOME)
@@ -274,8 +274,8 @@ function Invoke-AgentLoad {
     }
     if ($homeForTrust) {
       $under = [string]::Equals($expCanon, $homeForTrust, [StringComparison]::OrdinalIgnoreCase) -or
-        $expCanon.StartsWith($homeForTrust + '/', [StringComparison]::OrdinalIgnoreCase) -or
-        $expCanon.StartsWith($homeForTrust + '\', [StringComparison]::OrdinalIgnoreCase)
+      $expCanon.StartsWith($homeForTrust + '/', [StringComparison]::OrdinalIgnoreCase) -or
+      $expCanon.StartsWith($homeForTrust + '\', [StringComparison]::OrdinalIgnoreCase)
       if (-not $under) {
         Write-Log E launcher fail "trustedSymlinkRoots entry must canonicalise under `$HOME ($homeForTrust): $entry -> $expCanon"
         throw "invalid trustedSymlinkRoots entry"

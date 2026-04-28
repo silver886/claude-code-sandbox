@@ -147,7 +147,19 @@ _emit_row() {
       else
         ROW_state="dead"
       fi
-      mt=$(stat -c '%Y' "$mt_src" 2>/dev/null || stat -f '%m' "$mt_src" 2>/dev/null || echo "$now")
+      # Prefer the preserved `created` epoch over owner-file mtime: the
+      # owner KV file is rewritten via `mv -f` on every reclaim
+      # (init-launcher.sh _write_owner_file), so its mtime resets to
+      # "last reclaim" — but `created` is preserved verbatim across
+      # reclaims and is what _reclaim_session uses as its in-tier
+      # tiebreak. Showing mtime-derived age here misleads operators
+      # debugging "why did reclaim pick this session?". Fall back to
+      # mtime only for legacy sessions without a `created` field.
+      if [ -n "$ROW_created" ]; then
+        mt=$ROW_created
+      else
+        mt=$(stat -c '%Y' "$mt_src" 2>/dev/null || stat -f '%m' "$mt_src" 2>/dev/null || echo "$now")
+      fi
       if [ "$now" -gt 0 ] && [ "$mt" -gt 0 ]; then
         secs=$((now - mt))
         if   [ "$secs" -lt 60 ];     then ROW_age="${secs}s"

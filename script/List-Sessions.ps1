@@ -57,8 +57,8 @@ foreach ($p in [Diagnostics.Process]::GetProcesses()) {
   $procAlive[$p.Id] = $true
   try { $procStart[$p.Id] = [string]$p.StartTime.ToFileTimeUtc() } catch {}
 }
-$pidAlive   = { param([int]$p) $procAlive.ContainsKey($p) }
-$pidStart   = { param([int]$p) if ($procStart.ContainsKey($p))  { $procStart[$p]  } else { '' } }
+$pidAlive = { param([int]$p) $procAlive.ContainsKey($p) }
+$pidStart = { param([int]$p) if ($procStart.ContainsKey($p)) { $procStart[$p] } else { '' } }
 $pidCmdline = { param([int]$p) if ($cimCmdline.ContainsKey($p)) { $cimCmdline[$p] } else { '' } }
 
 $agentRoot = [IO.Path]::Combine($projectRoot, 'agent')
@@ -147,18 +147,32 @@ foreach ($a in $agents) {
       $alive = & $ownerAlive $pidNum $ownerStart $expectedCmd
     }
     $row.state = if ($alive) { 'alive' } else { 'dead' }
+    # Prefer the preserved `created` epoch over owner-file mtime: the
+    # owner KV file is rewritten via `mv -f` on every reclaim
+    # (Init-Launcher.ps1 $writeOwnerFile), so its mtime resets to
+    # "last reclaim" — but `created` is preserved verbatim across
+    # reclaims and is what $reclaimSession uses as its in-tier
+    # tiebreak. Showing mtime-derived age here misleads operators
+    # debugging "why did reclaim pick this session?". Fall back to
+    # mtime only for legacy sessions without a `created` field.
     # mtSrc is either a file (owner / owner.pid) or a directory ($s).
     # [IO.File] handles files; fall back to [IO.Directory] for dirs.
-    $mt = if ([IO.File]::Exists($mtSrc)) {
-      [IO.File]::GetLastWriteTimeUtc($mtSrc)
-    }
-    elseif ([IO.Directory]::Exists($mtSrc)) {
-      [IO.Directory]::GetLastWriteTimeUtc($mtSrc)
+    $createdEpoch = 0L
+    if ($row.created -ne '-' -and [int64]::TryParse([string]$row.created, [ref]$createdEpoch) -and $createdEpoch -gt 0) {
+      $secs = [int]($now.ToUnixTimeSeconds() - $createdEpoch)
     }
     else {
-      $now.UtcDateTime
+      $mt = if ([IO.File]::Exists($mtSrc)) {
+        [IO.File]::GetLastWriteTimeUtc($mtSrc)
+      }
+      elseif ([IO.Directory]::Exists($mtSrc)) {
+        [IO.Directory]::GetLastWriteTimeUtc($mtSrc)
+      }
+      else {
+        $now.UtcDateTime
+      }
+      $secs = [int]($now - [DateTimeOffset]$mt).TotalSeconds
     }
-    $secs = [int]($now - [DateTimeOffset]$mt).TotalSeconds
     $row.age = if ($secs -lt 60) { "${secs}s" }
     elseif ($secs -lt 3600) { "$([int]($secs/60))m" }
     elseif ($secs -lt 86400) { "$([int]($secs/3600))h" }
