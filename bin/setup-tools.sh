@@ -75,15 +75,30 @@ fi
 
 # Set the executable bit on the specific binaries we ship — not every
 # file in BIN_DIR. agent-manifest.sh is sourced (not exec'd), so it
-# should stay mode 0644. Pre-existing files under BIN_DIR are also
-# left untouched.
+# should stay mode 0644. Pre-existing files under BIN_DIR are left
+# untouched: we walk each archive's own table of contents and only
+# chmod top-level entries we just unpacked, skipping subdir contents
+# (they're inside *-pkg/ trees moved to LIB_DIR above) and the
+# agent-manifest.sh config file.
 #
 # Defense-in-depth: lib/tools.sh / Tools.ps1 already chmod +x before
 # packing and tar preserves mode bits on extract, so this loop is
 # normally a no-op. Kept in case a future packer, caching layer, or
-# host filesystem loses the bit in transit.
-for _name in node rg micro pnpm uv uvx "$AGENT_BINARY" "${AGENT_BINARY}-bin"; do
-  [ -f "$BIN_DIR/$_name" ] && chmod +x "$BIN_DIR/$_name"
+# host filesystem loses the bit in transit. Using the archive
+# manifest (rather than a hardcoded name list) keeps this generic
+# across new bin entries — pnpm ships pn/pnx/pnpx alongside pnpm,
+# and node-bundle agents may render any number of shims from their
+# package.json `bin` map.
+for archive in "$@"; do
+  while IFS= read -r _entry; do
+    case "$_entry" in
+      */*|'') continue ;;
+      agent-manifest.sh) continue ;;
+    esac
+    [ -f "$BIN_DIR/$_entry" ] && chmod +x "$BIN_DIR/$_entry"
+  done <<EOF
+$(tar --xz -tf "$archive")
+EOF
 done
 
 log I archive done "$BIN_DIR"

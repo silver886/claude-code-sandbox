@@ -16,8 +16,9 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 AGENT=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --agent) AGENT="$2"; shift 2 ;;
+    --agent) require_arg cred --agent "$#" "${2-}"; AGENT="$2"; shift 2 ;;
     --log-level)
+      require_arg cred --log-level "$#" "${2-}"
       case "$2" in
         I|i) LOG_LEVEL=I ;;
         W|w) LOG_LEVEL=W ;;

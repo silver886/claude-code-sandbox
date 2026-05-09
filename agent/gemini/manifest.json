@@ -16,8 +16,7 @@
   "executable": {
     "type":           "node-bundle",
     "versionPackage": "@google/gemini-cli",
-    "tarballUrl":     "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-{version}.tgz",
-    "entryPath":      "package/bundle/gemini.js"
+    "tarballUrl":     "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-{version}.tgz"
   },
   "launch": {
     "flags": ["--yolo"],

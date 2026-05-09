@@ -34,18 +34,21 @@ esac
 [ -f "${_dir:-}/agent-manifest.sh" ] || _dir="$HOME/.local/bin"
 . "$_dir/agent-manifest.sh"
 
-if [ -x /usr/local/lib/crate/enable-dnf ]; then
-  # Always call enable-dnf --purge to drop the bootstrap sudoers rule
-  # before the agent starts — so the agent can't invoke enable-dnf
-  # later to grant itself dnf. Add --yes only when the user opted in
-  # with CRATE_ALLOW_DNF=1 (set by the launcher's --allow-dnf flag).
-  # Pass log level as an explicit arg: Fedora sudoers env_check
-  # strips unknown env vars even with --preserve-env=, and adding
-  # LOG_LEVEL to env_keep would widen the bootstrap sudoers rule.
+if [ -x /usr/local/lib/crate/enable-dnf ] \
+   && sudo -n -l /usr/local/lib/crate/enable-dnf >/dev/null 2>&1; then
+  # Purge the bootstrap sudoers rule before exec'ing the agent so the
+  # agent itself can't invoke enable-dnf. Add --yes only when the user
+  # opted in with CRATE_ALLOW_DNF=1 (the launcher's --allow-dnf flag).
+  # Log level is an explicit arg: sudoers env_check strips unknown env
+  # vars and widening env_keep would widen the bootstrap rule.
   #
-  # Failure here means the bootstrap sudoers rule may still be in
-  # place — fail loudly rather than exec the agent with a latent
-  # privilege-escalation path still available.
+  # The `sudo -n -l` probe above gates this block: rule present → run
+  # the purge; rule absent (already purged on a prior run, or wrapper
+  # invoked manually without bootstrap) → skip, nothing to do.
+  #
+  # Failure of the call itself still means the rule may remain — fail
+  # loudly rather than exec the agent with a latent privilege-
+  # escalation path.
   _DNF_LVL="--log-level $LOG_LEVEL"
   if [ -n "${CRATE_ALLOW_DNF:-}" ]; then
     sudo /usr/local/lib/crate/enable-dnf $_DNF_LVL --yes --purge

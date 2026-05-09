@@ -51,11 +51,10 @@ _realpath() {
 # canonical agent config dir, or any path declared in the manifest's
 # `trustedSymlinkRoots` array (canonicalised in agent_load). /etc/...,
 # ~/.ssh, browser tokens, etc. all fail by default — the previous
-# blanket "all of $HOME" widening let an LLM agent with write access
-# to its own config dir plant a symlink to any home-resident secret
-# and have it staged into the next session. See code-review-handoff.md
-# CR-001. To re-enable a known cross-app layout (e.g. scoop persist
-# on Windows), declare it explicitly in the agent manifest.
+# "all of $HOME" widening let an agent with write access to its own
+# config dir symlink any home-resident secret into the next session.
+# To re-enable a known cross-app layout (e.g. scoop persist on
+# Windows), declare it explicitly in the agent manifest.
 #
 # AGENT_TRUSTED_ROOTS is newline-delimited (entries validated to
 # contain no LF/CR in agent_load). Iterate via IFS=newline so paths
@@ -159,7 +158,7 @@ init_config_dir() {
   # the warning must still fire. The previous `[ -e "$PWD/.git" ]` check
   # missed that. Stop at filesystem root. Both regular `.git` dirs and
   # worktree pointer files (`.git` is a regular file) are detected via
-  # `-e`. See code-review-handoff.md CR-003.
+  # `-e`.
   #
   # Only `.` needs escaping: agent_load whitelists $AGENT_PROJECT_DIR to
   # [A-Za-z0-9._-]+, so the rest is regex-inert in both rg's Rust regex

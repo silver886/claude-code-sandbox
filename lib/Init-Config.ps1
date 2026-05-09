@@ -25,10 +25,9 @@
 # declared in the manifest's `trustedSymlinkRoots` array (canonicalised
 # in Agent.ps1 → $script:agentTrustedRoots). C:\Windows\..., /etc/...,
 # ~/.ssh, browser tokens etc. all fail by default — the previous
-# blanket "all of $HOME" widening let an LLM agent with write access
-# to its own config dir plant a junction to any home-resident secret
-# and have it staged into the next session. See code-review-handoff.md
-# CR-001. To re-enable a known cross-app layout (scoop persist, etc.),
+# "all of $HOME" widening let an agent with write access to its own
+# config dir junction any home-resident secret into the next session.
+# To re-enable a known cross-app layout (scoop persist, etc.),
 # declare it explicitly in the agent manifest.
 #
 # Trim trailing separators so '/' vs '/*' comparisons aren't confused
@@ -152,7 +151,7 @@ $initConfigDir = {
   # case `.system\` is still commit-visible from the parent and the
   # warning must still fire. The previous `$PWD\.git` check missed that.
   # `.git` matches both regular repos (directory) and worktrees /
-  # submodules (regular file pointer). See code-review-handoff.md CR-003.
+  # submodules (regular file pointer).
   $gitTop = $null
   $walk = $PWD.Path
   while ($walk) {

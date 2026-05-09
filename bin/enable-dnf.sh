@@ -27,8 +27,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --yes)       ENABLE=1; shift ;;
     --purge)     PURGE=1; shift ;;
-    --user)      USER_OPT="$2"; shift 2 ;;
+    --user)      require_arg dnf --user "$#" "${2-}"; USER_OPT="$2"; shift 2 ;;
     --log-level)
+      require_arg dnf --log-level "$#" "${2-}"
       case "$2" in
         I|i) LOG_LEVEL=I ;;
         W|w) LOG_LEVEL=W ;;

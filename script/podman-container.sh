@@ -25,16 +25,17 @@ OPT_NEW_SESSION=""
 OPT_SESSION_ID=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --agent)        AGENT="$2"; shift 2 ;;
-    --base-hash)    OPT_BASE_HASH="$2"; shift 2 ;;
-    --tool-hash)    OPT_TOOL_HASH="$2"; shift 2 ;;
-    --agent-hash)   OPT_AGENT_HASH="$2"; shift 2 ;;
+    --agent)        require_arg launcher --agent "$#" "${2-}";       AGENT="$2"; shift 2 ;;
+    --base-hash)    require_arg launcher --base-hash "$#" "${2-}";   OPT_BASE_HASH="$2"; shift 2 ;;
+    --tool-hash)    require_arg launcher --tool-hash "$#" "${2-}";   OPT_TOOL_HASH="$2"; shift 2 ;;
+    --agent-hash)   require_arg launcher --agent-hash "$#" "${2-}";  OPT_AGENT_HASH="$2"; shift 2 ;;
     --force-pull)   FORCE_PULL=1; shift ;;
-    --image)        BASE_IMAGE="$2"; shift 2 ;;
+    --image)        require_arg launcher --image "$#" "${2-}";       BASE_IMAGE="$2"; shift 2 ;;
     --allow-dnf)    ALLOW_DNF=1; shift ;;
     --new-session)  OPT_NEW_SESSION=1; shift ;;
-    --session)      OPT_SESSION_ID="$2"; shift 2 ;;
+    --session)      require_arg launcher --session "$#" "${2-}";     OPT_SESSION_ID="$2"; shift 2 ;;
     --log-level)
+      require_arg launcher --log-level "$#" "${2-}"
       case "$2" in
         I|i) LOG_LEVEL=I ;;
         W|w) LOG_LEVEL=W ;;

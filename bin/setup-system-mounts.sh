@@ -48,14 +48,15 @@ _RF_B64=""
 _RD_B64=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --workdir)      WORKDIR="$2"; shift 2 ;;
-    --project-dir)  PROJECT_DIR="$2"; shift 2 ;;
-    --session-id)   SESSION_ID="$2"; shift 2 ;;
-    --target)       TARGET="$2"; shift 2 ;;
-    --config-files) _CF_B64="$2"; shift 2 ;;
-    --ro-files)     _RF_B64="$2"; shift 2 ;;
-    --ro-dirs)      _RD_B64="$2"; shift 2 ;;
+    --workdir)      require_arg mounts --workdir "$#" "${2-}";      WORKDIR="$2"; shift 2 ;;
+    --project-dir)  require_arg mounts --project-dir "$#" "${2-}";  PROJECT_DIR="$2"; shift 2 ;;
+    --session-id)   require_arg mounts --session-id "$#" "${2-}";   SESSION_ID="$2"; shift 2 ;;
+    --target)       require_arg mounts --target "$#" "${2-}";       TARGET="$2"; shift 2 ;;
+    --config-files) require_arg mounts --config-files "$#" "${2-}"; _CF_B64="$2"; shift 2 ;;
+    --ro-files)     require_arg mounts --ro-files "$#" "${2-}";     _RF_B64="$2"; shift 2 ;;
+    --ro-dirs)      require_arg mounts --ro-dirs "$#" "${2-}";      _RD_B64="$2"; shift 2 ;;
     --log-level)
+      require_arg mounts --log-level "$#" "${2-}"
       case "$2" in
         I|i) LOG_LEVEL=I ;;
         W|w) LOG_LEVEL=W ;;

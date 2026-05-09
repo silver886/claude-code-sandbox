@@ -89,12 +89,27 @@ $genSessionId = {
 # $pidCmdline, $pidStart, $ownerGet, $ownerAlive live in
 # lib/Session.ps1 — shared with script/List-Sessions.ps1.
 
+# Strip CR/LF from a value so the owner-file's `key=value\n` format
+# invariant holds. Mirror of _owner_kv_safe in lib/init-launcher.sh —
+# keep both in lockstep. Windows paths are unlikely to contain these,
+# but routing every field through one gate keeps the invariant
+# enforced in a single place and matches the POSIX side.
+$ownerKvSafe = { param($v) ([string]$v) -replace '[\r\n]', ' ' }
+
 # Capture the launcher's "context" — the 6 attributes used both to tag
 # a fresh session and to look up an existing one to reclaim.
 # Same shell tab + same project + same user → identical ctx across
 # re-launches, which is what makes default reclaim re-attach
 # deterministically. Different tab / new login / moved project → at
 # least one field changes → fall through to fresh id.
+#
+# String fields are canonicalized through $ownerKvSafe at capture so
+# the disk-stored value (also routed through the gate) and the live
+# $script:ctx* value compared in $sessionMatchTier are byte-identical
+# when the underlying source is unchanged. Without this, a cwd /
+# cmdline containing CR/LF would tier-downgrade an exact match, since
+# the on-disk value has CR/LF collapsed to spaces while the in-memory
+# value does not.
 $captureCtx = {
   $script:ctxPpid = 0
   try {
@@ -103,17 +118,19 @@ $captureCtx = {
   }
   catch {}
   $script:ctxPpidStart = & $pidStart $script:ctxPpid
-  $script:ctxPpidCmd = & $pidCmdline $script:ctxPpid
-  $script:ctxCwd = $PWD.Path
-  $script:ctxUser = [Environment]::UserName
-  $script:ctxHost = [Environment]::MachineName
+  $script:ctxPpidCmd = & $ownerKvSafe (& $pidCmdline $script:ctxPpid)
+  $script:ctxCwd = & $ownerKvSafe $PWD.Path
+  $script:ctxUser = & $ownerKvSafe ([Environment]::UserName)
+  $script:ctxHost = & $ownerKvSafe ([Environment]::MachineName)
 }
 
 # Atomic write of the unified `owner` metadata file. One `key=value`
-# per line. Newlines in values are collapsed to spaces so the KV
-# format stays parsable. Caller must have populated the $script:ctx*
-# vars via $captureCtx first AND must hold the session's .lock file,
-# since this is a read-modify-write of the existing owner file.
+# per line. Newlines in values are collapsed to spaces — $script:ctx*
+# arrive pre-canonicalized from $captureCtx; the launcher's own
+# cmdline is gated below at write time. Caller must have populated
+# the $script:ctx* vars via $captureCtx first AND must hold the
+# session's .lock file, since this is a read-modify-write of the
+# existing owner file.
 #
 # `start` is the launcher's own process start token, recorded so
 # liveness can require pid + start + cmd — same 3-field identity the
@@ -127,8 +144,10 @@ $captureCtx = {
 $writeOwnerFile = { param([string]$Path)
   $ownPid = $PID
   $ownStart = & $pidStart $ownPid
-  $ownCmd = (& $pidCmdline $ownPid).Replace("`r", '').Replace("`n", ' ')
-  $ppidCmdSafe = $script:ctxPpidCmd.Replace("`r", '').Replace("`n", ' ')
+  # Launcher's own cmdline is freshly read here (not in $script:ctx*),
+  # so it still needs the safety gate. ctx* fields are already
+  # canonicalized by $captureCtx — see comment there for the invariant.
+  $ownCmd = & $ownerKvSafe (& $pidCmdline $ownPid)
   $created = if ([IO.File]::Exists($Path)) { & $ownerGet $Path 'created' } else { '' }
   if (-not $created) { $created = [string][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
   $sb = [Text.StringBuilder]::new(512)
@@ -137,7 +156,7 @@ $writeOwnerFile = { param([string]$Path)
   [void]$sb.Append("cmd=$ownCmd`n")
   [void]$sb.Append("ppid=$($script:ctxPpid)`n")
   [void]$sb.Append("ppid_start=$($script:ctxPpidStart)`n")
-  [void]$sb.Append("ppid_cmd=$ppidCmdSafe`n")
+  [void]$sb.Append("ppid_cmd=$($script:ctxPpidCmd)`n")
   [void]$sb.Append("cwd=$($script:ctxCwd)`n")
   [void]$sb.Append("user=$($script:ctxUser)`n")
   [void]$sb.Append("host=$($script:ctxHost)`n")
@@ -384,7 +403,7 @@ $resolveSessionId = {
 # being redirected to UNC/network storage (folder redirection, OneDrive
 # Known Folder Move) would otherwise fail mid-launch — after `wsl
 # --import` or after the base-tar export — leaving partial state to
-# clean up. See code-review-handoff.md CR-002.
+# clean up.
 $preflightWslPaths = {
   if (-not $IsWindows) { return }
   $checks = @(

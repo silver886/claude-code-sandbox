@@ -85,6 +85,21 @@ fi
 # $LOG_LEVEL is read on every call so the launcher can parse
 # --log-level after sourcing this file.
 
+# require_arg <stage> <flag> <count> <next-token>
+# Guard the `--flag VAL` parse pattern against `set -u` aborts when
+# VAL is missing or empty. Call as:
+#   require_arg launcher --agent "$#" "${2-}"
+# Exits 1 with a structured arg-parse error when count < 2 or VAL is
+# empty. Pairs with the existing arg-parse log emitted by case
+# fallthrough — keeps the failure message consistent with `unknown
+# option: …` and `invalid --log-level: …`.
+require_arg() {
+  if [ "${3:-0}" -lt 2 ] || [ -z "${4-}" ]; then
+    log E "$1" arg-parse "missing value for $2"
+    exit 1
+  fi
+}
+
 # log <lvl> <stage> <event> <message>
 log() {
   # Normalize to uppercase so a stray lowercase value doesn't silently

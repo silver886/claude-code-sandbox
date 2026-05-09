@@ -31,10 +31,17 @@ ALL_COLUMNS="id agent state pid cmd ppid ppid_start ppid_cmd cwd user host creat
 OPT_AGENT=""
 OPT_COLUMNS="$DEFAULT_COLUMNS"
 
+# Guard $2 access: `set -e` + missing value would otherwise abort
+# silently on `shift 2` when N > $#.
+_require_arg() {
+  [ "$2" -ge 2 ] && [ -n "${3-}" ] && return 0
+  echo "missing value for $1 (see header comment for usage)" >&2
+  exit 1
+}
 while [ $# -gt 0 ]; do
   case "$1" in
-    --agent)   OPT_AGENT="$2";   shift 2 ;;
-    --columns) OPT_COLUMNS="$2"; shift 2 ;;
+    --agent)   _require_arg --agent   "$#" "${2-}"; OPT_AGENT="$2";   shift 2 ;;
+    --columns) _require_arg --columns "$#" "${2-}"; OPT_COLUMNS="$2"; shift 2 ;;
     *) echo "unknown arg: $1 (see header comment for usage)" >&2; exit 1 ;;
   esac
 done
@@ -136,6 +143,10 @@ _emit_row() {
         ROW_user=$(_owner_get       "$s/owner" user)
         ROW_host=$(_owner_get       "$s/owner" host)
         ROW_created=$(_owner_get    "$s/owner" created)
+        # `created` is operator-editable in the owner file; drop it if
+        # non-numeric so the [ "$mt" -gt 0 ] test below falls back to
+        # mtime cleanly instead of emitting "integer expression expected".
+        case "$ROW_created" in ''|*[!0-9]*) ROW_created= ;; esac
         mt_src="$s/owner"
       elif [ -f "$s/owner.pid" ]; then
         ROW_pid=$(head -n1 "$s/owner.pid" 2>/dev/null)

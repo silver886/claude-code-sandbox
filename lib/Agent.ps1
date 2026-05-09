@@ -66,6 +66,37 @@ function Invoke-AgentLoad {
 
   $envName = $script:agentManifest.configDir.env
   $defaultPath = $script:agentManifest.configDir.default
+  # Validate configDir.default before it flows into $agentConfigDir
+  # (host-side, API-quoted) and $crateDir (interpolated into ssh /
+  # wsl shell command strings on POSIX backends inside single quotes —
+  # a bare `'` in the value would break out of the literal). The
+  # other manifest fields with similar exposure (.binary, .projectDir,
+  # configDir.env) all have segment whitelists for the same reason.
+  # Mirrors the lib/agent.sh validator so a manifest accepted here
+  # is also accepted by the POSIX loader.
+  if ($defaultPath) {
+    if ($defaultPath.StartsWith('$HOME/')) {
+      $checkPath = $defaultPath.Substring('$HOME/'.Length)
+    }
+    elseif ($defaultPath.StartsWith('/')) {
+      $checkPath = $defaultPath.Substring(1)
+    }
+    else {
+      Write-Log E launcher fail "invalid .configDir.default in $($script:agentManifestPath): '$defaultPath' (must start with '`$HOME/' or '/')"
+      throw "invalid .configDir.default: $defaultPath"
+    }
+    if (-not $checkPath) {
+      Write-Log E launcher fail "invalid .configDir.default in $($script:agentManifestPath): '$defaultPath' (path must have at least one segment)"
+      throw "invalid .configDir.default: $defaultPath"
+    }
+    foreach ($seg in $checkPath.Split('/')) {
+      if ($seg -eq '' -or $seg -eq '.' -or $seg -eq '..' -or
+          $seg -notmatch '^[A-Za-z0-9._-]+$') {
+        Write-Log E launcher fail "invalid .configDir.default in $($script:agentManifestPath): '$defaultPath' (segment '$seg' must match [A-Za-z0-9._-]+ and not be '.' or '..')"
+        throw "invalid .configDir.default: $defaultPath"
+      }
+    }
+  }
   $script:agentConfigDir = ''
   $configDirFromEnv = $false
   if ($envName) {
@@ -201,7 +232,15 @@ function Invoke-AgentLoad {
   $rawRoots = @()
   if ($script:agentManifest.PSObject.Properties.Name -contains 'trustedSymlinkRoots' -and
     $null -ne $script:agentManifest.trustedSymlinkRoots) {
-    $rawRoots = [string[]](@($script:agentManifest.trustedSymlinkRoots))
+    # Reject scalar shapes — lib/agent.sh rejects them via jq's `type`
+    # check, so accepting them here would silently allow manifests
+    # that work on Windows but fail on POSIX.
+    $tsr = $script:agentManifest.trustedSymlinkRoots
+    if ($tsr -isnot [Array]) {
+      Write-Log E launcher fail "$($script:agentManifestPath) .trustedSymlinkRoots must be an array"
+      throw ".trustedSymlinkRoots must be an array"
+    }
+    $rawRoots = [string[]]$tsr
   }
   $homeForTrust = [IO.Path]::GetFullPath($HOME)
   if ([IO.Directory]::Exists($homeForTrust)) {
@@ -314,7 +353,15 @@ function Test-ManifestPaths {
   if ($script:agentManifest.PSObject.Properties.Name -contains 'files') {
     foreach ($listName in @('rw', 'ro', 'roDirs')) {
       $list = $script:agentManifest.files.$listName
-      if ($null -ne $list) { foreach ($e in @($list)) { $entries.Add($e) } }
+      if ($null -eq $list) { continue }
+      # Reject scalar shapes — lib/agent.sh's jq pass would error on
+      # `(string)[]`, so accepting a one-element wrap here would be
+      # silent cross-backend drift.
+      if ($list -isnot [Array]) {
+        Write-Log E launcher fail "$($script:agentManifestPath) .files.$listName must be an array"
+        throw ".files.$listName must be an array"
+      }
+      foreach ($e in $list) { $entries.Add($e) }
     }
   }
   if ($script:agentManifest.PSObject.Properties.Name -contains 'credential' -and

@@ -88,14 +88,13 @@ $buildToolArchives = {
       [Net.Http.HttpMethod]::Head,
       'https://github.com/micro-editor/micro/releases/latest')
     $microTask = $http.SendAsync($microReq)
-    # pnpm: version from the @pnpm/exe npm package's `latest` dist-tag —
-    # the maintainer's blessed stable channel. The
-    # /-/package/<name>/dist-tags endpoint returns only the tag map
-    # (~150 bytes) instead of the full versions document (~500KB). The
-    # subpackage that holds the binary is selected by major version
-    # below (see $pnpmNpmPkg) so a future v11-as-`latest` promotion
-    # transitions automatically.
-    $pnpmTask = $http.GetStringAsync('https://registry.npmjs.org/-/package/@pnpm/exe/dist-tags')
+    # pnpm: full `latest` metadata in one fetch — gets version, tarball
+    # URL, and sha512 SRI in a single ~3 KB response. We use the vanilla
+    # `pnpm` package (mjs node-bundle, ~17 MB unpacked) executed against
+    # the node we already ship in the base tier, NOT the per-arch
+    # @pnpm/linuxstatic-<arch> Node SEA (~140 MB unpacked, ~123 MB of
+    # which is bundled node — wasted bytes for us).
+    $pnpmTask = $http.GetStringAsync('https://registry.npmjs.org/pnpm/latest')
     $uvTask = $http.GetStringAsync('https://pypi.org/pypi/uv/json')
     [Threading.Tasks.Task]::WaitAll($nodeTask, $rgTask, $microTask, $pnpmTask, $uvTask)
 
@@ -120,7 +119,13 @@ $buildToolArchives = {
     $microSeg = $microFinalUri.Substring($microFinalUri.LastIndexOf('/') + 1)
     $script:microVer = $microSeg.TrimStart('v')
     $microTask.Result.Dispose()
-    $script:pnpmVer = $pnpmJson.RootElement.GetProperty('latest').GetString()
+    # `pnpm/latest` returns the full version document, so version,
+    # tarball URL, and integrity all come from this single response —
+    # no second metadata fetch needed.
+    $script:pnpmVer = $pnpmJson.RootElement.GetProperty('version').GetString()
+    $pnpmDist = $pnpmJson.RootElement.GetProperty('dist')
+    $script:pnpmTarballUrl = $pnpmDist.GetProperty('tarball').GetString()
+    $script:pnpmNpmIntegrity = $pnpmDist.GetProperty('integrity').GetString()
     $script:uvVer = $uvJson.RootElement.GetProperty('info').GetProperty('version').GetString()
 
     $nodeJson.Dispose(); $rgJson.Dispose()
@@ -140,47 +145,13 @@ $buildToolArchives = {
       throw "failed to fetch tool versions: $($missing -join ', ')"
     }
 
-    # Resolve npm tarball URL + integrity for the matching
-    # linuxstatic-<arch> binary subpackage. The npm tarball ships a
-    # single self-contained SEA (dist/ baked into the snapshot, no
-    # sibling files), and we verify against npm's sha512 SRI — same
-    # trust path as the agent tier. Pinning the URL host to
-    # registry.npmjs.org matches the agent-tier policy: a compromised
-    # metadata redirect can't point us at an attacker host.
-    # Subpackage holding the binary changes with the major version:
-    #   v10 and older: @pnpm/linux-<arch>       (glibc — only variant published)
-    #   v11+:          @pnpm/linuxstatic-<arch> (musl, fully static SEA)
-    # Both layouts ship a single self-contained `package/pnpm` binary
-    # inside the tarball, verified against npm's sha512 SRI (same
-    # trust path as the agent tier). $pnpmNpmPkg is passed into the
-    # tier-builder thread job for logging.
-    $pnpmMajor = 0
-    [int]::TryParse(($script:pnpmVer -split '\.')[0], [ref]$pnpmMajor) | Out-Null
-    if ($pnpmMajor -ge 11) {
-      $script:pnpmNpmPkg = "@pnpm/linuxstatic-$($script:arch)"
-    }
-    else {
-      $script:pnpmNpmPkg = "@pnpm/linux-$($script:arch)"
-    }
-    $pnpmMetaUrl = "https://registry.npmjs.org/$($script:pnpmNpmPkg)/$($script:pnpmVer)"
-    try {
-      $pnpmMetaJson = $http.GetStringAsync($pnpmMetaUrl).Result
-    }
-    catch {
-      Write-Log E tools fail "pnpm $($script:pnpmVer): failed to fetch $pnpmMetaUrl"
-      throw "pnpm npm metadata fetch failed: $_"
-    }
-    $pnpmMetaDoc = [Text.Json.JsonDocument]::Parse($pnpmMetaJson)
-    try {
-      $dist = $pnpmMetaDoc.RootElement.GetProperty('dist')
-      $script:pnpmTarballUrl = $dist.GetProperty('tarball').GetString()
-      $script:pnpmNpmIntegrity = $dist.GetProperty('integrity').GetString()
-    }
-    finally { $pnpmMetaDoc.Dispose() }
     if (-not $script:pnpmTarballUrl -or -not $script:pnpmNpmIntegrity) {
-      Write-Log E tools fail "pnpm $($script:pnpmVer): missing dist.tarball / dist.integrity at $pnpmMetaUrl"
+      Write-Log E tools fail "pnpm $($script:pnpmVer): missing dist.tarball / dist.integrity"
       throw "pnpm npm metadata missing dist fields"
     }
+    # Pinning the URL host to registry.npmjs.org matches the agent-tier
+    # policy: a compromised metadata redirect can't point us at an
+    # attacker host.
     if (-not $script:pnpmTarballUrl.StartsWith('https://registry.npmjs.org/')) {
       Write-Log E tools fail "pnpm tarball URL not on registry.npmjs.org: $($script:pnpmTarballUrl)"
       throw "pnpm tarball URL not on npm registry"
@@ -358,6 +329,107 @@ $buildToolArchives = {
       return $null
     }
 
+    # Render shims from the node-shim template for every entry in
+    # $pkgDir/package.json's `.bin` map. Validates bin names, writes
+    # one shim per entry into $outDir, and returns a string array of
+    # rendered filenames the caller word-uses as pack inputs.
+    #
+    # $canonIn / $canonOut route the shim for the bin entry whose
+    # name equals $canonIn to filename $canonOut instead of using the
+    # bin key. Agent tier passes ($binary, "$binary-bin") so
+    # agent-wrapper.sh finds its entry; tool tier passes ('','').
+    # Mirrors lib/tools.sh:_render_node_bin_shims — same validation
+    # rules, same output shape.
+    $renderNodeBinShims = { param($outDir, $pkgDir, $pkgName, $shimTmpl, $canonIn, $canonOut)
+      $pkgJsonPath = [IO.Path]::Combine($pkgDir, 'package.json')
+      if (-not [IO.File]::Exists($pkgJsonPath)) {
+        Write-Log E $stage fail "package.json missing at $pkgJsonPath"
+        throw "$stage`: package.json missing"
+      }
+      $files = [Collections.Generic.List[string]]::new()
+      $sawCanon = $false
+      $pkgJson = [Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($pkgJsonPath))
+      try {
+        # Locate `.bin` via EnumerateObject rather than TryGetProperty:
+        # JsonElement.TryGetProperty has three overloads (string,
+        # ReadOnlySpan<byte>, ReadOnlySpan<char>) and PowerShell's
+        # method binder can't disambiguate when the `out` parameter is
+        # passed as `[ref]$x` against an untyped/null variable —
+        # surfaces as "Cannot find an overload for TryGetProperty and
+        # the argument count: 2" at runtime.
+        $binEl = $pkgJson.RootElement
+        $hasBin = $false
+        foreach ($prop in $pkgJson.RootElement.EnumerateObject()) {
+          if ($prop.Name -eq 'bin') { $binEl = $prop.Value; $hasBin = $true; break }
+        }
+        if (-not $hasBin -or $binEl.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+          Write-Log E $stage fail "$pkgJsonPath`: .bin must be an object"
+          throw "$stage`: .bin not an object"
+        }
+        foreach ($p in $binEl.EnumerateObject()) {
+          $binName = $p.Name
+          $binPath = $p.Value.GetString()
+          # Validate bin key: rejects path separators, shell metas,
+          # leading hyphen (would look like a flag), leading dot (no '..').
+          if ($binName -notmatch '^[A-Za-z0-9_][A-Za-z0-9._-]*$') {
+            Write-Log E $stage fail "invalid bin name in $pkgJsonPath`: '$binName'"
+            throw "$stage`: invalid bin name '$binName'"
+          }
+          $entry = $binPath -replace '^\./', ''
+          # Validate bin path: must be relative, no traversal, safe
+          # segments. Interpolated into the shim's `exec node
+          # "$HOME/.local/lib/PKG/{{ENTRY}}"` template — a quote,
+          # backslash, control char, or '..' would either break the
+          # double-quoted shell literal or escape the package dir.
+          # Mirrors the lib/tools.sh validator.
+          if (-not $entry -or $entry.StartsWith('/') -or $entry.Contains('\')) {
+            Write-Log E $stage fail "invalid bin path in $pkgJsonPath`: '$binPath' (must be a non-empty relative path with no backslashes)"
+            throw "$stage`: invalid bin path '$binPath'"
+          }
+          foreach ($seg in $entry.Split('/')) {
+            if ($seg -eq '' -or $seg -eq '.' -or $seg -eq '..' -or
+                $seg -notmatch '^[A-Za-z0-9._-]+$') {
+              Write-Log E $stage fail "invalid bin path segment in $pkgJsonPath`: '$binPath' (segment '$seg' must match [A-Za-z0-9._-]+ and not be '.' or '..')"
+              throw "$stage`: invalid bin path segment"
+            }
+          }
+          if ($canonIn -and $binName -eq $canonIn) {
+            $target = $canonOut
+            $sawCanon = $true
+          }
+          else {
+            $target = $binName
+            # Reject aux-shim collisions with reserved agent-tier
+            # filenames. Tool tier (no $canonIn) skips this naturally.
+            if ($canonIn) {
+              if ($target -eq 'agent-manifest.sh' -or
+                  $target -eq $canonIn -or
+                  $target -eq $canonOut -or
+                  $target -eq "$canonIn-pkg") {
+                Write-Log E $stage fail "aux bin '$binName' collides with reserved filename '$target'"
+                throw "$stage`: aux bin '$binName' collides with reserved filename"
+              }
+            }
+          }
+          $shim = $shimTmpl.Replace('{{PKG}}', $pkgName).Replace('{{ENTRY}}', $entry)
+          [IO.File]::WriteAllText([IO.Path]::Combine($outDir, $target), $shim)
+          [void]$files.Add($target)
+        }
+      }
+      finally { $pkgJson.Dispose() }
+      if ($files.Count -eq 0) {
+        Write-Log E $stage fail "$pkgJsonPath`: no .bin entries rendered"
+        throw "$stage`: no .bin entries rendered"
+      }
+      if ($canonIn -and -not $sawCanon) {
+        Write-Log E $stage fail "canonical bin '$canonIn' not found in $pkgJsonPath"
+        throw "$stage`: canonical bin '$canonIn' not found"
+      }
+      # Return as a fixed array — `,` prefix prevents PowerShell from
+      # unwrapping a single-element list into a scalar.
+      ,$files.ToArray()
+    }
+
     if ($optHash) {
       if (-not (& $archiveOk $archive)) {
         Write-Log E $stage fail "pinned archive is corrupt: $([IO.Path]::GetFileName($archive))"
@@ -425,12 +497,12 @@ $buildToolArchives = {
           $packInputs = @('node', 'rg', 'micro')
         }
         'tool' {
-          Write-Log I $stage downloading "pnpm $($vars.pnpmVer) ($($vars.pnpmNpmPkg)), uv $($vars.uvVer)"
-          # pnpm SEA binary from npm subpackage (linux-<arch> on
-          # v10/glibc, linuxstatic-<arch> on v11+/musl). Both layouts
-          # pack a single self-contained binary as `package/pnpm` and
-          # ship a sha512 SRI in `dist.integrity` — same trust path as
-          # the agent tier.
+          Write-Log I $stage downloading "pnpm $($vars.pnpmVer), uv $($vars.uvVer)"
+          # pnpm vanilla npm package: a Node bundle (mjs entry, ~17 MB
+          # unpacked) executed against the base-tier node via the same
+          # shim template the agent tier uses for node-bundle agents.
+          # Verified against npm's sha512 `dist.integrity` — same
+          # trust path as the agent tier.
           $pnpmUrl = $vars.pnpmTarballUrl
           $uvUrl = "https://github.com/astral-sh/uv/releases/download/$($vars.uvVer)/uv-$($vars.archTriple).tar.gz"
           $pnpmTask = $http.GetByteArrayAsync($pnpmUrl)
@@ -449,18 +521,28 @@ $buildToolArchives = {
           [IO.Directory]::CreateDirectory($pnpmExtract) > $null
           & $mustNative tar -xzf $pnpmTmp -C $pnpmExtract
           [IO.File]::Delete($pnpmTmp)
-          $pnpmBinSrc = "$pnpmExtract\package\pnpm"
-          if (-not [IO.File]::Exists($pnpmBinSrc)) {
-            Write-Log E $stage fail "pnpm npm tarball missing 'package/pnpm' binary"
-            throw "pnpm npm tarball missing 'package/pnpm' binary"
+          $pnpmPkgSrc = "$pnpmExtract\package"
+          if (-not [IO.Directory]::Exists($pnpmPkgSrc)) {
+            Write-Log E $stage fail "pnpm npm tarball missing 'package/' dir"
+            throw "pnpm npm tarball missing 'package/' dir"
           }
-          [IO.File]::Move($pnpmBinSrc, "$tmpDir\pnpm")
+          # Relocate package/ → pnpm-pkg/ matching the on-disk layout
+          # used for node-bundle agents (~/.local/lib/<name>-pkg/) —
+          # setup-tools.sh globs `*-pkg` and moves them into LIB_DIR
+          # generically.
+          [IO.Directory]::Move($pnpmPkgSrc, "$tmpDir\pnpm-pkg")
           [IO.Directory]::Delete($pnpmExtract, $true)
+          # Render one shim per package.json `bin` entry. pnpm publishes
+          # 4 (pn, pnx, pnpm, pnpx — pn/pnpm and pnx/pnpx are aliases for
+          # the same JS files); shipping them all keeps user-facing
+          # invocation parity with `npm i -g pnpm`. No canonical mapping
+          # in the tool tier — there's no wrapper layer.
+          $pnpmShims = & $renderNodeBinShims $tmpDir "$tmpDir\pnpm-pkg" 'pnpm-pkg' $vars.shimTmpl '' ''
 
           $uvTmp = "$tmpDir\_uv.tar.gz"; [IO.File]::WriteAllBytes($uvTmp, $uvTask.Result)
           & $mustNative tar -xzf $uvTmp -C $tmpDir --strip-components=1
           [IO.File]::Delete($uvTmp)
-          $packInputs = @('pnpm', 'uv', 'uvx')
+          $packInputs = @($pnpmShims) + @('pnpm-pkg', 'uv', 'uvx')
         }
         'agent' {
           Write-Log I $stage downloading "$($vars.agentName) $($vars.agentVer) ($($vars.execType))"
@@ -495,15 +577,14 @@ $buildToolArchives = {
               }
               $pkgName = "$binary-pkg"
               [IO.Directory]::Move($pkgSrc, "$tmpDir\$pkgName")
-              $entryRel = $vars.entryPath
-              if ($entryRel.StartsWith('package/')) { $entryRel = $entryRel.Substring('package/'.Length) }
-              # Render the node-bundle shim from the template the parent
-              # passed in via $vars.shimTmpl (loaded from bin/agent-node-
-              # shim.sh.tmpl). Same template both sides — never duplicate
-              # the shim text.
-              $shim = $vars.shimTmpl.Replace('{{PKG}}', $pkgName).Replace('{{ENTRY}}', $entryRel)
-              [IO.File]::WriteAllText("$tmpDir\$binary-bin", $shim)
-              $packInputs = @($binary, 'agent-manifest.sh', "$binary-bin", $pkgName)
+              # Render one shim per package.json `bin` entry. The
+              # canonical entry (key matching .binary) goes to
+              # "$binary-bin" so agent-wrapper.sh finds it; auxiliary
+              # entries become standalone shims under their bin keys.
+              # $agentShims holds the full list of rendered filenames
+              # (canonical + aux), spread into $packInputs below.
+              $agentShims = & $renderNodeBinShims $tmpDir "$tmpDir\$pkgName" $pkgName $vars.shimTmpl $binary "$binary-bin"
+              $packInputs = @($binary, 'agent-manifest.sh') + @($agentShims) + @($pkgName)
             }
             default { throw "unknown executable.type: $($vars.execType)" }
           }
@@ -625,12 +706,23 @@ $buildToolArchives = {
       $baseHash = & $sha256 "base-arch:$($script:arch)-node:$nodeVer-rg:$rgVer-micro:$microVer"
       $script:baseArchive = "$toolsDir\base-$baseHash.tar.xz"
     }
+    # Shim template bytes — both tool tier (pnpm) and agent tier
+    # (node-bundle agents) render this template, so changes to it must
+    # bust both tier caches AND must be passed into both thread-jobs
+    # for rendering. Loaded once on the parent side; $lfOnly collapses
+    # CRLF→LF so sh-side hashing matches regardless of the source
+    # file's on-disk line endings.
+    $shimTmpl = & $lfOnly ([IO.File]::ReadAllText("$projectRoot\bin\node-shim.sh.tmpl"))
+
     if ($optToolHash) {
       $script:toolArchive = & $resolveArchive 'tool' $optToolHash
     }
     else {
-      # arch:$arch covers pnpm and uv (both per-arch native binaries).
-      $toolHash = & $sha256 "tool-arch:$($script:arch)-pnpm:$pnpmVer-uv:$uvVer"
+      # arch:$arch covers uv (per-arch native binary). pnpm is now JS,
+      # so its bytes are arch-agnostic — but the archive is shared
+      # with uv, so $arch stays in the seed. Include shim template
+      # since pnpm's `pnpm` entry is the rendered shim.
+      $toolHash = & $sha256 "tool-arch:$($script:arch)-pnpm:$pnpmVer-uv:$uvVer-shim:$shimTmpl"
       $script:toolArchive = "$toolsDir\tool-$toolHash.tar.xz"
     }
     # Compute the generated agent-manifest.sh up front — used both in the
@@ -643,70 +735,11 @@ $buildToolArchives = {
     }
     else {
       # Include manifest source, generated agent-manifest.sh, and wrapper
-      # source in the hash. $lfOnly collapses CRLF→LF so sh-side hashing
-      # matches regardless of the source files' on-disk line endings.
+      # source in the hash.
       $manifestSrc = & $lfOnly ([IO.File]::ReadAllText($agentManifestPath))
       $wrapperSrc = & $lfOnly ([IO.File]::ReadAllText("$projectRoot\bin\agent-wrapper.sh"))
-      $shimTmplHash = & $lfOnly ([IO.File]::ReadAllText("$projectRoot\bin\agent-node-shim.sh.tmpl"))
-      $agentHash = & $sha256 "agent:$agent-ver:$agentVer-arch:$arch-manifest:$manifestSrc-manifest-sh:$manifestShContents-wrapper:$wrapperSrc-shim:$shimTmplHash"
+      $agentHash = & $sha256 "agent:$agent-ver:$agentVer-arch:$arch-manifest:$manifestSrc-manifest-sh:$manifestShContents-wrapper:$wrapperSrc-shim:$shimTmpl"
       $script:agentArchive = "$toolsDir\$agent-$agentHash.tar.xz"
-    }
-
-    # Prepare agent-tier inputs (parsed on the parent side because
-    # manifest objects don't serialize cleanly into thread runspaces).
-    $execType = Get-AgentField '.executable.type'
-    $tarballUrl = & $substTokens (Get-AgentField '.executable.tarballUrl') $script:agentVer
-    $binPath = Get-AgentField '.executable.binPath'
-    if ($binPath) { $binPath = & $substTokens $binPath $script:agentVer }
-    $entryPath = Get-AgentField '.executable.entryPath'
-    if ($entryPath) { $entryPath = & $substTokens $entryPath $script:agentVer }
-    $wrapperSrcForPack = & $lfOnly ([IO.File]::ReadAllText("$projectRoot\bin\agent-wrapper.sh"))
-    # Loaded once on the parent side and passed into the agent thread-job
-    # via $agentVars.shimTmpl — same source-of-truth as lib/tools.sh's
-    # node-bundle path, no inline duplicate.
-    $shimTmplForPack = & $lfOnly ([IO.File]::ReadAllText("$projectRoot\bin\agent-node-shim.sh.tmpl"))
-
-    # Resolve npm package name AND tarball-version from the URL. The
-    # version we look up MUST match the tarball we download — codex
-    # publishes per-platform binaries as version-suffixed releases
-    # ('0.125.0-linux-x64', '0.125.0-darwin-arm64', …) under the same
-    # '@openai/codex' package, so the integrity for '0.125.0' (the JS
-    # wrapper) is NOT the integrity for '0.125.0-linux-x64' (the
-    # platform binary we actually fetch). Extract the version from the
-    # tarball's basename instead of using $script:agentVer, which only
-    # knows the wrapper's version. URL shape:
-    # '<scope>/<name>/-/<basename>-<version>.tgz'. Restrict to
-    # registry.npmjs.org so a manifest can't redirect verification at
-    # an attacker-controlled metadata host.
-    if (-not $tarballUrl.StartsWith('https://registry.npmjs.org/')) {
-      Write-Log E "tools.$agent" fail "unsupported tarball host (only registry.npmjs.org is allowed): $tarballUrl"
-      throw "unsupported tarball host: $tarballUrl"
-    }
-    $npmRest = $tarballUrl.Substring('https://registry.npmjs.org/'.Length)
-    $npmSepIdx = $npmRest.IndexOf('/-/')
-    if ($npmSepIdx -lt 0) {
-      Write-Log E "tools.$agent" fail "tarball URL missing '/-/' separator: $tarballUrl"
-      throw "tarball URL missing /-/ separator"
-    }
-    $npmPkg = $npmRest.Substring(0, $npmSepIdx)
-    $npmFilename = $npmRest.Substring($npmSepIdx + '/-/'.Length)
-    $npmPkgBase = $npmPkg.Substring($npmPkg.LastIndexOf('/') + 1)
-    $npmExpectedPrefix = "$npmPkgBase-"
-    if (-not $npmFilename.StartsWith($npmExpectedPrefix) -or -not $npmFilename.EndsWith('.tgz')) {
-      Write-Log E "tools.$agent" fail "tarball filename does not match '<pkg>-<version>.tgz' shape: $npmFilename (pkg=$npmPkgBase)"
-      throw "tarball filename shape mismatch: $npmFilename"
-    }
-    $npmTarVer = $npmFilename.Substring($npmExpectedPrefix.Length, $npmFilename.Length - $npmExpectedPrefix.Length - '.tgz'.Length)
-    $npmMetaUrl = "https://registry.npmjs.org/$npmPkg/$npmTarVer"
-    $npmMetaJson = $http.GetStringAsync($npmMetaUrl).Result
-    $npmMetaDoc = [Text.Json.JsonDocument]::Parse($npmMetaJson)
-    try {
-      $npmIntegrity = $npmMetaDoc.RootElement.GetProperty('dist').GetProperty('integrity').GetString()
-    }
-    finally { $npmMetaDoc.Dispose() }
-    if (-not $npmIntegrity) {
-      Write-Log E "tools.$agent" fail "no dist.integrity at $npmMetaUrl"
-      throw "no dist.integrity for $agent"
     }
 
     $baseVars = @{
@@ -720,22 +753,83 @@ $buildToolArchives = {
       userAgent = $crateUserAgent
       pnpmVer = $script:pnpmVer; uvVer = $script:uvVer
       arch = $script:arch; archTriple = $script:archTriple
-      pnpmNpmPkg = $script:pnpmNpmPkg
       pnpmTarballUrl = $script:pnpmTarballUrl
       pnpmNpmIntegrity = $script:pnpmNpmIntegrity
+      shimTmpl = $shimTmpl
     }
-    $agentVars = @{
-      kind = 'agent'
-      userAgent = $crateUserAgent
-      agentName = $agent; agentBinary = $script:agentBinary
-      agentVer = $script:agentVer
-      execType = $execType
-      tarballUrl = $tarballUrl
-      binPath = $binPath; entryPath = $entryPath
-      manifestShContents = $manifestShContents
-      wrapperSrc = $wrapperSrcForPack
-      shimTmpl = $shimTmplForPack
-      npmIntegrity = $npmIntegrity
+    # Agent-tier inputs are only needed when the tier will actually
+    # build. When pinned (-AgentHash …), $tierBuilder verifies the
+    # cached archive and returns before reading $vars, so we skip the
+    # parsing, {version} substitution, and npm dist.integrity fetch
+    # entirely — otherwise pinned/offline launches throw on the
+    # network call below. Mirrors lib/tools.sh:_build_agent_tier,
+    # which gates the same prep behind OPT_AGENT_HASH.
+    if (-not $optAgentHash) {
+      $execType = Get-AgentField '.executable.type'
+      $tarballUrl = & $substTokens (Get-AgentField '.executable.tarballUrl') $script:agentVer
+      $binPath = Get-AgentField '.executable.binPath'
+      if ($binPath) { $binPath = & $substTokens $binPath $script:agentVer }
+      $wrapperSrcForPack = & $lfOnly ([IO.File]::ReadAllText("$projectRoot\bin\agent-wrapper.sh"))
+
+      # Resolve npm package name AND tarball-version from the URL. The
+      # version we look up MUST match the tarball we download — codex
+      # publishes per-platform binaries as version-suffixed releases
+      # ('0.125.0-linux-x64', '0.125.0-darwin-arm64', …) under the same
+      # '@openai/codex' package, so the integrity for '0.125.0' (the JS
+      # wrapper) is NOT the integrity for '0.125.0-linux-x64' (the
+      # platform binary we actually fetch). Extract the version from the
+      # tarball's basename instead of using $script:agentVer, which only
+      # knows the wrapper's version. URL shape:
+      # '<scope>/<name>/-/<basename>-<version>.tgz'. Restrict to
+      # registry.npmjs.org so a manifest can't redirect verification at
+      # an attacker-controlled metadata host.
+      if (-not $tarballUrl.StartsWith('https://registry.npmjs.org/')) {
+        Write-Log E "tools.$agent" fail "unsupported tarball host (only registry.npmjs.org is allowed): $tarballUrl"
+        throw "unsupported tarball host: $tarballUrl"
+      }
+      $npmRest = $tarballUrl.Substring('https://registry.npmjs.org/'.Length)
+      $npmSepIdx = $npmRest.IndexOf('/-/')
+      if ($npmSepIdx -lt 0) {
+        Write-Log E "tools.$agent" fail "tarball URL missing '/-/' separator: $tarballUrl"
+        throw "tarball URL missing /-/ separator"
+      }
+      $npmPkg = $npmRest.Substring(0, $npmSepIdx)
+      $npmFilename = $npmRest.Substring($npmSepIdx + '/-/'.Length)
+      $npmPkgBase = $npmPkg.Substring($npmPkg.LastIndexOf('/') + 1)
+      $npmExpectedPrefix = "$npmPkgBase-"
+      if (-not $npmFilename.StartsWith($npmExpectedPrefix) -or -not $npmFilename.EndsWith('.tgz')) {
+        Write-Log E "tools.$agent" fail "tarball filename does not match '<pkg>-<version>.tgz' shape: $npmFilename (pkg=$npmPkgBase)"
+        throw "tarball filename shape mismatch: $npmFilename"
+      }
+      $npmTarVer = $npmFilename.Substring($npmExpectedPrefix.Length, $npmFilename.Length - $npmExpectedPrefix.Length - '.tgz'.Length)
+      $npmMetaUrl = "https://registry.npmjs.org/$npmPkg/$npmTarVer"
+      $npmMetaJson = $http.GetStringAsync($npmMetaUrl).Result
+      $npmMetaDoc = [Text.Json.JsonDocument]::Parse($npmMetaJson)
+      try {
+        $npmIntegrity = $npmMetaDoc.RootElement.GetProperty('dist').GetProperty('integrity').GetString()
+      }
+      finally { $npmMetaDoc.Dispose() }
+      if (-not $npmIntegrity) {
+        Write-Log E "tools.$agent" fail "no dist.integrity at $npmMetaUrl"
+        throw "no dist.integrity for $agent"
+      }
+
+      $agentVars = @{
+        kind = 'agent'
+        userAgent = $crateUserAgent
+        agentName = $agent; agentBinary = $script:agentBinary
+        agentVer = $script:agentVer
+        execType = $execType
+        tarballUrl = $tarballUrl
+        binPath = $binPath
+        manifestShContents = $manifestShContents
+        wrapperSrc = $wrapperSrcForPack
+        shimTmpl = $shimTmpl
+        npmIntegrity = $npmIntegrity
+      }
+    }
+    else {
+      $agentVars = @{}
     }
     $jobs = @(
       Start-ThreadJob -ScriptBlock $tierBuilder -ArgumentList @(

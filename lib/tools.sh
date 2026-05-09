@@ -67,6 +67,102 @@ _verify_npm_integrity() {
   fi
 }
 
+# Render shims from bin/node-shim.sh.tmpl for every entry in
+# PKG_DIR/package.json's `.bin` map. Validates bin names, writes one
+# shim per entry into OUT_DIR (with +x), and prints the rendered
+# filenames space-joined to stdout — caller captures via $(...) for
+# pack inputs.
+#
+# CANON_IN/CANON_OUT route the shim for the bin entry named CANON_IN
+# to filename CANON_OUT instead of the bin key. The agent tier passes
+# ($binary, ${binary}-bin) so agent-wrapper.sh finds its entry; the
+# tool tier passes ("","") since there's no wrapper layer.
+#
+# Args: OUT_DIR  PKG_DIR  PKG_NAME  CANON_IN  CANON_OUT  STAGE
+_render_node_bin_shims() {
+  _rb_out_dir=$1; _rb_pkg_dir=$2; _rb_pkg_name=$3
+  _rb_canon_in=$4; _rb_canon_out=$5; _rb_stage=$6
+  _rb_pkg_json="$_rb_pkg_dir/package.json"
+  if [ ! -f "$_rb_pkg_json" ]; then
+    log E "$_rb_stage" fail "package.json missing at $_rb_pkg_json"
+    exit 1
+  fi
+  _rb_tmpl=$(tr -d '\r' < "$PROJECT_ROOT/bin/node-shim.sh.tmpl")
+  _rb_files=""
+  _rb_saw_canon=0
+  while IFS= read -r -d '' _rb_name && IFS= read -r -d '' _rb_path; do
+    # Validate bin key: rejects path separators, shell metas, leading
+    # hyphen (would look like a flag), and leading dot (no `..`).
+    case "$_rb_name" in
+      ''|*[!A-Za-z0-9._-]*|-*|.*)
+        log E "$_rb_stage" fail "invalid bin name in $_rb_pkg_json: '$_rb_name'"
+        exit 1 ;;
+    esac
+    _rb_entry=${_rb_path#./}
+    # Validate bin path: must be relative, no traversal, safe segments.
+    # Interpolated into the shim's `exec node "$HOME/.local/lib/PKG/{{ENTRY}}"`
+    # template — a quote, backslash, control char, newline, or '..' would
+    # either break the double-quoted shell literal, escape the package
+    # dir, or surface as an invalid filesystem write target. Mirrors the
+    # existing per-segment whitelist used for .binary / .projectDir /
+    # files.* entries elsewhere in the loader.
+    case "$_rb_entry" in
+      ''|/*)
+        log E "$_rb_stage" fail "invalid bin path in $_rb_pkg_json: '$_rb_path' (must be a non-empty relative path)"
+        exit 1
+        ;;
+    esac
+    _rb_old_ifs=$IFS
+    IFS=/
+    for _rb_seg in $_rb_entry; do
+      case "$_rb_seg" in
+        ''|.|..|*[!A-Za-z0-9._-]*)
+          IFS=$_rb_old_ifs
+          log E "$_rb_stage" fail "invalid bin path segment in $_rb_pkg_json: '$_rb_path' (segment '$_rb_seg' must match [A-Za-z0-9._-]+ and not be '.' or '..')"
+          exit 1
+          ;;
+      esac
+    done
+    IFS=$_rb_old_ifs
+    if [ -n "$_rb_canon_in" ] && [ "$_rb_name" = "$_rb_canon_in" ]; then
+      _rb_target=$_rb_canon_out
+      _rb_saw_canon=1
+    else
+      _rb_target=$_rb_name
+      # Reject aux-shim collisions with reserved agent-tier filenames.
+      # Only relevant when a canonical mapping is in effect (tool tier
+      # has no wrapper / manifest, so this check naturally skips).
+      if [ -n "$_rb_canon_in" ]; then
+        case "$_rb_target" in
+          agent-manifest.sh|"$_rb_canon_in"|"$_rb_canon_out"|"${_rb_canon_in}-pkg")
+            log E "$_rb_stage" fail "aux bin '$_rb_name' collides with reserved filename"
+            exit 1 ;;
+        esac
+      fi
+    fi
+    _rb_shim=${_rb_tmpl//\{\{PKG\}\}/$_rb_pkg_name}
+    _rb_shim=${_rb_shim//\{\{ENTRY\}\}/$_rb_entry}
+    printf '%s' "$_rb_shim" > "$_rb_out_dir/$_rb_target"
+    chmod +x "$_rb_out_dir/$_rb_target"
+    _rb_files="$_rb_files $_rb_target"
+  done < <(jq -j '
+    if (.bin | type) == "object" then
+      .bin | to_entries[] | "\(.key)\u0000\(.value)\u0000"
+    else
+      error("package.json: .bin must be an object, got \(.bin | type)")
+    end
+  ' "$_rb_pkg_json")
+  if [ -z "$_rb_files" ]; then
+    log E "$_rb_stage" fail "$_rb_pkg_json: no .bin entries rendered"
+    exit 1
+  fi
+  if [ -n "$_rb_canon_in" ] && [ "$_rb_saw_canon" = 0 ]; then
+    log E "$_rb_stage" fail "canonical bin '$_rb_canon_in' not found in $_rb_pkg_json"
+    exit 1
+  fi
+  printf '%s' "${_rb_files# }"
+}
+
 # Wait for all PIDs; report and exit if any failed.
 wait_all() {
   _wa_fail=0
@@ -145,15 +241,14 @@ fetch_shared_versions() {
    _tag=${_final##*/}
    printf '%s' "${_tag#v}" > "$_DIR/micro") &
   _PID3=$!
-  # pnpm: version from the @pnpm/exe npm package's `latest` dist-tag —
-  # the maintainer's blessed stable channel. The
-  # /-/package/<name>/dist-tags endpoint returns only the tag map
-  # (~150 bytes) instead of the full versions document (~500KB). The
-  # subpackage that holds the binary is selected by major version
-  # below (see PNPM_NPM_PKG) so a future v11-as-`latest` promotion
-  # transitions automatically.
-  (curl -fsSL -A "$CRATE_USER_AGENT" https://registry.npmjs.org/-/package/@pnpm/exe/dist-tags \
-    | jq -r '.latest // empty' > "$_DIR/pnpm") &
+  # pnpm: full `latest` metadata in one fetch — gets version, tarball
+  # URL, and sha512 SRI in a single ~3 KB response. We use the vanilla
+  # `pnpm` package (mjs node-bundle, ~17 MB unpacked) executed against
+  # the node we already ship in the base tier, NOT the per-arch
+  # @pnpm/linuxstatic-<arch> Node SEA (~140 MB unpacked, ~123 MB of
+  # which is bundled node — wasted bytes for us).
+  (curl -fsSL -A "$CRATE_USER_AGENT" https://registry.npmjs.org/pnpm/latest \
+    > "$_DIR/pnpm.json") &
   _PID4=$!
   (curl -fsSL -A "$CRATE_USER_AGENT" https://pypi.org/pypi/uv/json \
     | jq -r .info.version > "$_DIR/uv") &
@@ -162,40 +257,24 @@ fetch_shared_versions() {
   NODE_VER=$(cat "$_DIR/node")
   RG_VER=$(cat "$_DIR/rg")
   MICRO_VER=$(cat "$_DIR/micro")
-  PNPM_VER=$(cat "$_DIR/pnpm")
+  _pnpm_meta=$(cat "$_DIR/pnpm.json")
   UV_VER=$(cat "$_DIR/uv")
   rm -rf "$_DIR"
+  PNPM_VER=$(printf '%s' "$_pnpm_meta" | jq -r '.version // empty')
+  PNPM_TARBALL_URL=$(printf '%s' "$_pnpm_meta" | jq -r '.dist.tarball // empty')
+  PNPM_NPM_INTEGRITY=$(printf '%s' "$_pnpm_meta" | jq -r '.dist.integrity // empty')
   if [ -z "$NODE_VER" ] || [ -z "$RG_VER" ] || [ -z "$MICRO_VER" ] || \
      [ -z "$PNPM_VER" ] || [ -z "$UV_VER" ]; then
     log E tools fail "failed to fetch one or more tool versions"
     exit 1
   fi
-
-  # Subpackage holding the binary changes with the major version:
-  #   v10 and older: @pnpm/linux-<arch>       (glibc — only variant published)
-  #   v11+:          @pnpm/linuxstatic-<arch> (musl, fully static SEA)
-  # Both layouts ship a single self-contained `package/pnpm` binary
-  # inside the tarball, verified against npm's sha512 SRI (same trust
-  # path as the agent tier). Pinning the URL host to
-  # registry.npmjs.org matches the agent-tier policy: a compromised
-  # metadata redirect can't point us at an attacker host.
-  _pnpm_major=${PNPM_VER%%.*}
-  if [ "$_pnpm_major" -ge 11 ] 2>/dev/null; then
-    PNPM_NPM_PKG="@pnpm/linuxstatic-${ARCH}"
-  else
-    PNPM_NPM_PKG="@pnpm/linux-${ARCH}"
-  fi
-  _pnpm_meta_url="https://registry.npmjs.org/${PNPM_NPM_PKG}/${PNPM_VER}"
-  if ! _pnpm_meta=$(curl -fsSL -A "$CRATE_USER_AGENT" "$_pnpm_meta_url"); then
-    log E tools fail "pnpm $PNPM_VER: failed to fetch $_pnpm_meta_url"
-    exit 1
-  fi
-  PNPM_TARBALL_URL=$(printf '%s' "$_pnpm_meta" | jq -r '.dist.tarball // empty')
-  PNPM_NPM_INTEGRITY=$(printf '%s' "$_pnpm_meta" | jq -r '.dist.integrity // empty')
   if [ -z "$PNPM_TARBALL_URL" ] || [ -z "$PNPM_NPM_INTEGRITY" ]; then
-    log E tools fail "pnpm $PNPM_VER: missing dist.tarball / dist.integrity at $_pnpm_meta_url"
+    log E tools fail "pnpm $PNPM_VER: missing dist.tarball / dist.integrity"
     exit 1
   fi
+  # Pinning the URL host to registry.npmjs.org matches the agent-tier
+  # policy: a compromised metadata redirect can't point us at an
+  # attacker host.
   case "$PNPM_TARBALL_URL" in
     https://registry.npmjs.org/*) ;;
     *) log E tools fail "pnpm tarball URL not on registry.npmjs.org: $PNPM_TARBALL_URL"; exit 1 ;;
@@ -370,14 +449,15 @@ _build_tool_tier() {
     log W tools.tool rebuild "cached archive corrupt; rebuilding"
     rm -f "$TOOL_ARCHIVE"
   fi
-  log I tools.tool downloading "pnpm $PNPM_VER ($PNPM_NPM_PKG), uv $UV_VER"
+  log I tools.tool downloading "pnpm $PNPM_VER, uv $UV_VER"
   _DIR=$(mktemp -d)
 
   (
-    # pnpm SEA binary from npm subpackage (linux-<arch> on v10/glibc,
-    # linuxstatic-<arch> on v11+/musl). Both layouts pack a single
-    # self-contained binary as `package/pnpm` and ship a sha512 SRI in
-    # `dist.integrity` — same trust path as the agent tier.
+    # pnpm vanilla npm package: a Node bundle (mjs entries, ~17 MB
+    # unpacked) executed against the base-tier node via the same shim
+    # template the agent tier uses for node-bundle agents. Verified
+    # against npm's sha512 `dist.integrity` — same trust path as the
+    # agent tier.
     _file="$_DIR/_pnpm.tgz"
     curl -fsSL -A "$CRATE_USER_AGENT" "$PNPM_TARBALL_URL" -o "$_file"
     _verify_npm_integrity "$_file" "$PNPM_NPM_INTEGRITY" "pnpm npm tarball"
@@ -385,11 +465,16 @@ _build_tool_tier() {
     mkdir -p "$_extract"
     tar -xz -C "$_extract" -f "$_file"
     rm -f "$_file"
-    if [ ! -f "$_extract/package/pnpm" ]; then
-      log E tools.tool fail "pnpm npm tarball missing 'package/pnpm' binary"
+    if [ ! -d "$_extract/package" ]; then
+      log E tools.tool fail "pnpm npm tarball missing 'package/' dir"
       exit 1
     fi
-    mv "$_extract/package/pnpm" "$_DIR/pnpm"
+    # Relocate package/ → pnpm-pkg/ matching the on-disk layout used
+    # for node-bundle agents (~/.local/lib/<name>-pkg/) — setup-tools.sh
+    # globs `*-pkg` and moves them into LIB_DIR generically. Shim
+    # rendering happens after wait_all so the pnpm-pkg/package.json
+    # is fully visible to _render_node_bin_shims.
+    mv "$_extract/package" "$_DIR/pnpm-pkg"
     rm -rf "$_extract"
   ) &
   _PID1=$!
@@ -405,10 +490,22 @@ _build_tool_tier() {
   _PID2=$!
   wait_all "$_PID1" "$_PID2"
 
-  chmod +x "$_DIR/pnpm" "$_DIR/uv" "$_DIR/uvx"
+  # Render one shim per package.json `bin` entry. pnpm publishes 4
+  # (pn, pnx, pnpm, pnpx — pn/pnpm and pnx/pnpx are aliases for the
+  # same JS files); shipping them all keeps user-facing invocation
+  # parity with `npm i -g pnpm`. Same template the agent tier renders
+  # for node-bundle agents — single source of truth.
+  _pnpm_shims=$(_render_node_bin_shims "$_DIR" "$_DIR/pnpm-pkg" pnpm-pkg "" "" tools.tool)
+
+  # The rendered shims (`pnpm`, `pn`, `pnx`, `pnpx`) are sh scripts
+  # invoked directly; the mjs entries inside pnpm-pkg/ are read by
+  # node and don't need the exec bit. uv/uvx are native binaries.
+  chmod +x "$_DIR/uv" "$_DIR/uvx"
   log I tools.tool packing "$(basename "$TOOL_ARCHIVE")"
   _TOOL_TMP=$(mktemp "$TOOL_ARCHIVE.partial.XXXXXXXX")
-  _pack_xz "$_TOOL_TMP" "$_DIR" pnpm uv uvx
+  # shellcheck disable=SC2086 -- $_pnpm_shims intentionally word-split;
+  # _render_node_bin_shims validates names against [A-Za-z0-9._-].
+  _pack_xz "$_TOOL_TMP" "$_DIR" $_pnpm_shims pnpm-pkg uv uvx
   mv -f "$_TOOL_TMP" "$TOOL_ARCHIVE"
   rm -rf "$_DIR"
   log I tools.tool cached "$(basename "$TOOL_ARCHIVE")"
@@ -562,7 +659,6 @@ _build_agent_tier() {
       chmod +x "$_DIR/${_binary}-bin"
       ;;
     node-bundle)
-      _entryPath=$(_subst "$(agent_get .executable.entryPath)" "$AGENT_VER")
       _pkg="${_binary}-pkg"
       # Relocate extract/ → <binary>-pkg/ for clarity and a stable
       # on-disk path (~/.local/lib/<binary>-pkg/) inside the sandbox.
@@ -572,18 +668,14 @@ _build_agent_tier() {
         log E "tools.$AGENT" fail "node bundle has no 'package/' dir"
         exit 1
       fi
-      _entryRel=${_entryPath#package/}
-      # Render the node-bundle shim from bin/agent-node-shim.sh.tmpl.
-      # Bash parameter expansion is enough — `{{PKG}}` / `{{ENTRY}}` are
-      # plain strings (no glob metachars), so ${var//pat/repl} replaces
-      # them literally. Strip CR so a CRLF checkout doesn't pack a
-      # `#!/usr/bin/env sh\r` shebang (broken on Linux) — and matches
-      # the normalized bytes the tier-3 hash is computed from.
-      _shim=$(tr -d '\r' < "$PROJECT_ROOT/bin/agent-node-shim.sh.tmpl")
-      _shim=${_shim//\{\{PKG\}\}/$_pkg}
-      _shim=${_shim//\{\{ENTRY\}\}/$_entryRel}
-      printf '%s' "$_shim" > "$_DIR/${_binary}-bin"
-      chmod +x "$_DIR/${_binary}-bin"
+      # Render one shim per package.json `bin` entry. The canonical
+      # entry (key matching .binary) goes to ${_binary}-bin so
+      # agent-wrapper.sh finds it; auxiliary entries become standalone
+      # shims under their bin keys. Captured _agent_shims is the full
+      # space-joined list of rendered filenames (canonical + aux),
+      # word-split into pack inputs below.
+      _agent_shims=$(_render_node_bin_shims "$_DIR" "$_DIR/$_pkg" "$_pkg" \
+        "$_binary" "${_binary}-bin" "tools.$AGENT")
       ;;
     *)
       log E "tools.$AGENT" fail "unknown executable.type: $_type"
@@ -605,7 +697,9 @@ _build_agent_tier() {
   log I "tools.$AGENT" packing "$(basename "$AGENT_ARCHIVE")"
   _AGENT_TMP=$(mktemp "$AGENT_ARCHIVE.partial.XXXXXXXX")
   if [ "$_type" = "node-bundle" ]; then
-    _pack_xz "$_AGENT_TMP" "$_DIR" "$_binary" agent-manifest.sh "${_binary}-bin" "${_binary}-pkg"
+    # shellcheck disable=SC2086 -- $_agent_shims intentionally word-split;
+    # _render_node_bin_shims validates names against [A-Za-z0-9._-].
+    _pack_xz "$_AGENT_TMP" "$_DIR" "$_binary" agent-manifest.sh $_agent_shims "${_binary}-pkg"
   else
     _pack_xz "$_AGENT_TMP" "$_DIR" "$_binary" agent-manifest.sh "${_binary}-bin"
   fi
@@ -660,11 +754,21 @@ build_tool_archives() {
     BASE_HASH=$(sha256 "base-arch:$ARCH-node:$NODE_VER-rg:$RG_VER-micro:$MICRO_VER")
     BASE_ARCHIVE="$TOOLS_DIR/base-$BASE_HASH.tar.xz"
   fi
+  # Shim template bytes — both tool tier (pnpm) and agent tier (node-
+  # bundle agents) render this template, so changes to it must bust
+  # both tier caches. Loaded once if either is unpinned and CR-stripped
+  # so Windows-side (CRLF) and Linux-side (LF) hashes match.
+  if [ -z "${OPT_TOOL_HASH:-}" ] || [ -z "${OPT_AGENT_HASH:-}" ]; then
+    _shim_tmpl=$(tr -d '\r' < "$PROJECT_ROOT/bin/node-shim.sh.tmpl")
+  fi
   if [ -n "${OPT_TOOL_HASH:-}" ]; then
     TOOL_ARCHIVE=$(resolve_archive "tool" "$OPT_TOOL_HASH")
   else
-    # arch:$ARCH covers pnpm and uv (both per-arch native binaries).
-    TOOL_HASH=$(sha256 "tool-arch:$ARCH-pnpm:$PNPM_VER-uv:$UV_VER")
+    # arch:$ARCH covers uv (per-arch native binary). pnpm is now JS,
+    # so its bytes are arch-agnostic — but the archive is shared with
+    # uv, so $ARCH stays in the seed. Include shim template since
+    # pnpm's `pnpm` entry is the rendered shim.
+    TOOL_HASH=$(sha256 "tool-arch:$ARCH-pnpm:$PNPM_VER-uv:$UV_VER-shim:$_shim_tmpl")
     TOOL_ARCHIVE="$TOOLS_DIR/tool-$TOOL_HASH.tar.xz"
   fi
   if [ -n "${OPT_AGENT_HASH:-}" ]; then
@@ -678,7 +782,6 @@ build_tool_archives() {
     _manifest_src=$(tr -d '\r' < "$AGENT_MANIFEST")
     _manifest_sh=$(_agent_manifest_sh_contents)
     _wrapper_src=$(tr -d '\r' < "$PROJECT_ROOT/bin/agent-wrapper.sh")
-    _shim_tmpl=$(tr -d '\r' < "$PROJECT_ROOT/bin/agent-node-shim.sh.tmpl")
     AGENT_HASH=$(sha256 "agent:$AGENT-ver:$AGENT_VER-arch:$ARCH-manifest:$_manifest_src-manifest-sh:$_manifest_sh-wrapper:$_wrapper_src-shim:$_shim_tmpl")
     AGENT_ARCHIVE="$TOOLS_DIR/$AGENT-$AGENT_HASH.tar.xz"
   fi

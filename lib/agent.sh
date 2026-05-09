@@ -93,6 +93,44 @@ agent_load() {
   # the sandbox is even built.
   _env_name=$(agent_get .configDir.env)
   _default=$(agent_get .configDir.default)
+  # Validate configDir.default before it flows into AGENT_CONFIG_DIR
+  # (host-side, argv-quoted) and CRATE_DIR (interpolated into the
+  # podman-machine ssh shell command string at script/podman-machine.sh,
+  # inside single quotes — a bare `'` in the value would break out of
+  # the literal). The other manifest fields with similar exposure
+  # (.binary, .projectDir, configDir.env) all have segment whitelists
+  # for the same reason — this was the gap.
+  #
+  # Allowed: empty (env-set agents may omit; downstream errors out
+  # clearly if both env and default are unusable), `$HOME/<segs>`
+  # token-prefixed, or `/<segs>` absolute. Each `/`-delimited segment
+  # must match [A-Za-z0-9._-]+ and not be '.' or '..'.
+  if [ -n "$_default" ]; then
+    case "$_default" in
+      '$HOME/'*) _check=${_default#\$HOME/} ;;
+      /*)        _check=${_default#/} ;;
+      *)
+        log E launcher fail "invalid .configDir.default in $AGENT_MANIFEST: '$_default' (must start with '\$HOME/' or '/')"
+        exit 1
+        ;;
+    esac
+    if [ -z "$_check" ]; then
+      log E launcher fail "invalid .configDir.default in $AGENT_MANIFEST: '$_default' (path must have at least one segment)"
+      exit 1
+    fi
+    _OLD_IFS=$IFS
+    IFS=/
+    for _seg in $_check; do
+      case "$_seg" in
+        ''|.|..|*[!A-Za-z0-9._-]*)
+          IFS=$_OLD_IFS
+          log E launcher fail "invalid .configDir.default in $AGENT_MANIFEST: '$_default' (segment '$_seg' must match [A-Za-z0-9._-]+ and not be '.' or '..')"
+          exit 1
+          ;;
+      esac
+    done
+    IFS=$_OLD_IFS
+  fi
   AGENT_CONFIG_DIR=""
   _config_dir_from_env=""
   if [ -n "$_env_name" ]; then
@@ -213,12 +251,11 @@ agent_load() {
   # Use case: scoop on Windows where ~/.config/<agent>/.credentials.json
   # is a junction to ~/scoop/persist/<agent>/.credentials.json.
   #
-  # Default (empty list) means "config-root only" — the strictest
-  # containment. The previous policy widened trust to all of $HOME so
-  # that scoop layouts worked, but that also let an LLM agent with
-  # write access to its own config dir plant a symlink to ~/.ssh/id_rsa
-  # (or any other home-resident secret) and have it staged into the
-  # next session. See code-review-handoff.md CR-001.
+  # Default (empty list) = config-root only. The previous policy
+  # widened trust to all of $HOME so scoop layouts worked, but that
+  # also let an LLM agent with write access to its own config dir
+  # plant a symlink to ~/.ssh/id_rsa (or any home-resident secret)
+  # and have it staged into the next session.
   #
   # Each manifest entry must be absolute or '$HOME/...' (only $HOME
   # expands), have no '..' segments, and canonicalise under $HOME so a

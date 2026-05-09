@@ -53,6 +53,15 @@ _gen_session_id() {
 # _pid_cmdline, _pid_start, _owner_get, _owner_alive live in
 # lib/session.sh — shared with script/list-sessions.sh.
 
+# Strip CR/LF from a value so the owner-file's `key=value\n` format
+# invariant holds. POSIX paths can legally contain newlines (cwd),
+# process cmdlines join NUL-separated argv with embedded \n possible,
+# and hostname/user values come from external sources. Routing every
+# field through one gate keeps the invariant enforced in one place.
+_owner_kv_safe() {
+  printf '%s' "$1" | tr '\r\n' '  '
+}
+
 # Capture the launcher's "context" — the 6 attributes we use both to
 # tag a fresh session and to look up an existing one to reclaim.
 # Sets CTX_PPID CTX_PPID_START CTX_PPID_CMD CTX_CWD CTX_USER CTX_HOST.
@@ -60,20 +69,29 @@ _gen_session_id() {
 # re-launches, which is what makes default reclaim re-attach
 # deterministically. Different tab / new login / moved project → at
 # least one field changes → fall through to fresh id.
+#
+# String fields are canonicalized through _owner_kv_safe at capture so
+# the disk-stored value (also routed through the gate) and the live
+# CTX_* value compared in _session_match_tier are byte-identical when
+# the underlying source is unchanged. Without this, a cwd / cmdline
+# containing CR/LF would tier-downgrade an exact match, since the on-
+# disk value has CR/LF collapsed to spaces while the in-memory value
+# does not.
 _capture_ctx() {
   CTX_PPID=$PPID
   CTX_PPID_START=$(_pid_start "$PPID")
-  CTX_PPID_CMD=$(_pid_cmdline "$PPID")
-  CTX_CWD=$PWD
-  CTX_USER=$(id -un 2>/dev/null || printf '%s' "${USER:-?}")
-  CTX_HOST=$(hostname 2>/dev/null || printf '%s' "${HOSTNAME:-?}")
+  CTX_PPID_CMD=$(_owner_kv_safe "$(_pid_cmdline "$PPID")")
+  CTX_CWD=$(_owner_kv_safe "$PWD")
+  CTX_USER=$(_owner_kv_safe "$(id -un 2>/dev/null || printf '%s' "${USER:-?}")")
+  CTX_HOST=$(_owner_kv_safe "$(hostname 2>/dev/null || printf '%s' "${HOSTNAME:-?}")")
 }
 
 # Write the session's `owner` metadata file atomically. Single file
 # with one `key=value` per line — easier to read in one shot than the
 # legacy owner.pid + owner.cmd split, and adds the 6 context fields the
 # default-reclaim matcher needs. Newlines in values are collapsed to
-# spaces so the KV format stays parsable.
+# spaces — CTX_* arrive pre-canonicalized from _capture_ctx; the
+# launcher's own cmdline is gated below at write time.
 #
 # `start` is the launcher's own process start token (`_pid_start $$`),
 # recorded so liveness can require pid + start + cmd — the same
@@ -94,8 +112,10 @@ _write_owner_file() {
   _f="$1"
   _own_pid=$$
   _own_start=$(_pid_start "$_own_pid")
-  _own_cmd=$(_pid_cmdline "$_own_pid" | tr '\n' ' ')
-  _ppid_cmd=$(printf '%s' "$CTX_PPID_CMD" | tr '\n' ' ')
+  # Launcher's own cmdline is freshly read here (not in CTX_*), so it
+  # still needs the safety gate. CTX_* fields are already canonicalized
+  # by _capture_ctx — see comment there for the invariant.
+  _own_cmd=$(_owner_kv_safe "$(_pid_cmdline "$_own_pid")")
   _created=$(_owner_get "$_f" created)
   [ -n "$_created" ] || _created=$(date +%s)
   _tmp=$(mktemp "$_f.tmp.XXXXXXXX")
@@ -105,7 +125,7 @@ _write_owner_file() {
     printf 'cmd=%s\n'        "$_own_cmd"
     printf 'ppid=%s\n'       "$CTX_PPID"
     printf 'ppid_start=%s\n' "$CTX_PPID_START"
-    printf 'ppid_cmd=%s\n'   "$_ppid_cmd"
+    printf 'ppid_cmd=%s\n'   "$CTX_PPID_CMD"
     printf 'cwd=%s\n'        "$CTX_CWD"
     printf 'user=%s\n'       "$CTX_USER"
     printf 'host=%s\n'       "$CTX_HOST"

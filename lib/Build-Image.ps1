@@ -38,21 +38,19 @@ $buildBaseImage = {
     return
   }
   Write-Log I image build $script:imageTag
-  # Resolve junction/symlink aliases in $projectRoot before passing it
-  # as the build context. On Windows, podman archives the context by
-  # physical path; an alias path (junction or symlink) can fail
-  # mid-tar — the practical reason for this resolve. ResolveLinkTarget
-  # is .NET 6+ (PS 7+); when $projectRoot is itself a reparse point we
-  # walk it, otherwise .FullName already gives a normalized path with
-  # `.`/`..` collapsed. This does NOT walk parent components — if a
-  # caller's working tree is reached through a junction'd ancestor,
-  # invoke from the canonical path or set CRATE_BUILD_CTX explicitly.
-  $rootItem = Get-Item -LiteralPath $projectRoot
-  $buildCtx = if ($rootItem.LinkType) {
-    $rootItem.ResolveLinkTarget($true).FullName
-  }
-  else {
-    $rootItem.FullName
+  # Canonicalize $projectRoot through reparse points in every path
+  # component — podman tars the build context by physical path on
+  # Windows, so a junction'd ancestor can fault mid-archive. Walk
+  # top-down from the drive root, re-resolving wherever LinkType is
+  # set. Mirrors `pwd -P` on the POSIX launchers.
+  $stack = [Collections.Generic.Stack[string]]::new()
+  $cur = Get-Item -LiteralPath $projectRoot -Force
+  while ($cur.Parent) { $stack.Push($cur.Name); $cur = $cur.Parent }
+  $buildCtx = $cur.FullName
+  while ($stack.Count -gt 0) {
+    $buildCtx = [IO.Path]::Combine($buildCtx, $stack.Pop())
+    $info = Get-Item -LiteralPath $buildCtx -Force
+    if ($info.LinkType) { $buildCtx = $info.ResolveLinkTarget($true).FullName }
   }
   $buildArgs = @('image', 'build', '--build-arg', "BASE_IMAGE=$Image", '--tag', $script:imageTag)
   if ($forcePull) { $buildArgs += '--no-cache' }
