@@ -19,7 +19,7 @@
     "tarballUrl":     "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-{version}.tgz"
   },
   "launch": {
-    "flags": ["--yolo"],
+    "flags": ["--skip-trust", "--yolo"],
     "env": {
       "GEMINI_SANDBOX": "false"
     }
