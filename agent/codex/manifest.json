@@ -17,7 +17,7 @@
     "type":           "platform-binary",
     "versionPackage": "@openai/codex",
     "tarballUrl":     "https://registry.npmjs.org/@openai/codex/-/codex-{version}-linux-{arch}.tgz",
-    "binPath":        "package/vendor/{triple}/codex/codex"
+    "binPath":        "package/vendor/{triple}/bin/codex"
   },
   "launch": {
     "flags": ["--dangerously-bypass-approvals-and-sandbox"],
